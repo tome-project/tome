@@ -7,3 +7,4 @@ export { clubsRouter } from './clubs';
 export { discussionsRouter } from './discussions';
 export { filesRouter } from './files';
 export { gutenbergRouter } from './gutenberg';
+export { statsRouter } from './stats';

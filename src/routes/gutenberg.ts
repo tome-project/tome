@@ -1,7 +1,13 @@
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { requireAuth } from '../middleware/auth';
+import { supabaseAdmin } from '../services/supabase';
 import { sendSuccess, sendError } from '../utils';
 
 export const gutenbergRouter = Router();
+
+const libraryPath = process.env.LIBRARY_PATH || './library';
 
 // Gutenberg API base URL
 const GUTENBERG_API = 'https://gutendex.com';
@@ -69,5 +75,57 @@ gutenbergRouter.get('/api/v1/gutenberg/popular', async (_req: Request, res: Resp
     sendSuccess(res, { books });
   } catch (_e) {
     sendError(res, 'Failed to fetch popular books', 502);
+  }
+});
+
+// POST /api/v1/gutenberg/download — download a Gutenberg book and add to library
+gutenbergRouter.post('/api/v1/gutenberg/download', requireAuth, async (req: Request, res: Response) => {
+  const { gutenberg_id, title, author, cover_url, epub_url } = req.body;
+
+  if (!gutenberg_id || !title || !epub_url) {
+    sendError(res, 'gutenberg_id, title, and epub_url are required');
+    return;
+  }
+
+  try {
+    // Ensure the gutenberg download directory exists
+    const gutenbergDir = path.join(libraryPath, 'gutenberg');
+    await fs.promises.mkdir(gutenbergDir, { recursive: true });
+
+    // Download the epub file
+    const filename = `gutenberg-${gutenberg_id}.epub`;
+    const filePath = path.join(gutenbergDir, filename);
+
+    const response = await fetch(epub_url);
+    if (!response.ok) {
+      sendError(res, 'Failed to download epub from Gutenberg', 502);
+      return;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await fs.promises.writeFile(filePath, buffer);
+
+    // Insert book record into the database
+    const { data: book, error } = await supabaseAdmin
+      .from('books')
+      .insert({
+        title,
+        author: author || 'Unknown',
+        cover_url: cover_url || null,
+        file_path: `gutenberg/${filename}`,
+        type: 'epub',
+        added_by: req.userId,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      sendError(res, error.message, 500);
+      return;
+    }
+
+    sendSuccess(res, book, 201);
+  } catch (_e) {
+    sendError(res, 'Failed to download and save book', 500);
   }
 });
