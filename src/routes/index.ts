@@ -4,3 +4,6 @@ export { libraryRouter } from './library';
 export { booksRouter } from './books';
 export { progressRouter } from './progress';
 export { clubsRouter } from './clubs';
+export { discussionsRouter } from './discussions';
+export { filesRouter } from './files';
+export { gutenbergRouter } from './gutenberg';

@@ -5,19 +5,36 @@ import { sendSuccess, sendError } from '../utils';
 
 export const libraryRouter = Router();
 
-// GET /api/v1/library — list all books in the user's library
+// GET /api/v1/library — list books with optional search/filter
 libraryRouter.get('/api/v1/library', requireAuth, async (req: Request, res: Response) => {
-  const { data, error } = await supabaseAdmin
+  const { q, type, page } = req.query;
+  const limit = 50;
+  const offset = page ? (Number(page) - 1) * limit : 0;
+
+  let query = supabaseAdmin
     .from('books')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  // Text search across title and author
+  if (q && typeof q === 'string') {
+    query = query.or(`title.ilike.%${q}%,author.ilike.%${q}%`);
+  }
+
+  // Filter by book type
+  if (type && typeof type === 'string') {
+    query = query.eq('type', type);
+  }
+
+  const { data, error, count } = await query;
 
   if (error) {
     sendError(res, error.message, 500);
     return;
   }
 
-  sendSuccess(res, data);
+  sendSuccess(res, { books: data, total: count });
 });
 
 // POST /api/v1/library/books — add a book to the library

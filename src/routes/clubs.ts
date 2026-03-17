@@ -6,6 +6,46 @@ import { sendSuccess, sendError } from '../utils';
 
 export const clubsRouter = Router();
 
+// GET /api/v1/clubs — list clubs the current user is a member of
+clubsRouter.get('/api/v1/clubs', requireAuth, async (req: Request, res: Response) => {
+  // Get all club IDs the user is a member of
+  const { data: memberships, error: memberError } = await supabaseAdmin
+    .from('club_members')
+    .select('club_id')
+    .eq('user_id', req.userId!);
+
+  if (memberError) {
+    sendError(res, memberError.message, 500);
+    return;
+  }
+
+  if (!memberships || memberships.length === 0) {
+    sendSuccess(res, []);
+    return;
+  }
+
+  const clubIds = memberships.map((m) => m.club_id);
+
+  const { data, error } = await supabaseAdmin
+    .from('clubs')
+    .select(`
+      *,
+      club_members (
+        user_id,
+        joined_at
+      )
+    `)
+    .in('id', clubIds)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    sendError(res, error.message, 500);
+    return;
+  }
+
+  sendSuccess(res, data);
+});
+
 // POST /api/v1/clubs — create a club
 clubsRouter.post('/api/v1/clubs', requireAuth, async (req: Request, res: Response) => {
   const { name, book_id, start_date, end_date } = req.body;
@@ -44,8 +84,8 @@ clubsRouter.post('/api/v1/clubs', requireAuth, async (req: Request, res: Respons
   sendSuccess(res, club, 201);
 });
 
-// GET /api/v1/clubs/:inviteCode — get club by invite code
-clubsRouter.get('/api/v1/clubs/:inviteCode', async (req: Request, res: Response) => {
+// GET /api/v1/clubs/invite/:inviteCode — get club by invite code
+clubsRouter.get('/api/v1/clubs/invite/:inviteCode', async (req: Request, res: Response) => {
   const { inviteCode } = req.params;
 
   const { data, error } = await supabaseAdmin
