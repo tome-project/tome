@@ -5,7 +5,8 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import { healthRouter } from './routes/health';
+import { healthRouter, authRouter, libraryRouter, booksRouter, progressRouter, clubsRouter } from './routes';
+import { errorHandler } from './middleware';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,6 +19,14 @@ app.use(express.json());
 
 // Routes
 app.use(healthRouter);
+app.use(authRouter);
+app.use(libraryRouter);
+app.use(booksRouter);
+app.use(progressRouter);
+app.use(clubsRouter);
+
+// Error handling
+app.use(errorHandler);
 
 app.listen(port, () => {
   console.log(`Tome server running on port ${port}`);

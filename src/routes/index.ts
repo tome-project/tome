@@ -1,1 +1,6 @@
 export { healthRouter } from './health';
+export { authRouter } from './auth';
+export { libraryRouter } from './library';
+export { booksRouter } from './books';
+export { progressRouter } from './progress';
+export { clubsRouter } from './clubs';
