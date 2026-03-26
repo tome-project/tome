@@ -13,3 +13,5 @@ export { wishlistRouter } from './wishlist';
 export { highlightsRouter } from './highlights';
 export { readingSessionsRouter } from './reading-sessions';
 export { activityRouter } from './activity';
+export { goalsRouter } from './goals';
+export { searchRouter } from './search';
