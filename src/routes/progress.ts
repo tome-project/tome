@@ -7,7 +7,7 @@ export const progressRouter = Router();
 
 // POST /api/v1/progress — save reading progress
 progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: Response) => {
-  const { book_id, position, percentage } = req.body;
+  const { book_id, position, percentage, status, start_date, finish_date, rating, review, favorite_quote } = req.body;
 
   if (!book_id || position === undefined || percentage === undefined) {
     sendError(res, 'book_id, position, and percentage are required');
@@ -19,19 +19,36 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     return;
   }
 
+  if (rating !== undefined && (rating < 1 || rating > 5)) {
+    sendError(res, 'rating must be between 1 and 5');
+    return;
+  }
+
+  const validStatuses = ['want_to_read', 'reading', 'finished', 'dnf'];
+  if (status !== undefined && !validStatuses.includes(status)) {
+    sendError(res, `status must be one of: ${validStatuses.join(', ')}`);
+    return;
+  }
+
+  const upsertData: Record<string, unknown> = {
+    user_id: req.userId,
+    book_id,
+    position: String(position),
+    percentage,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (status !== undefined) upsertData.status = status;
+  if (start_date !== undefined) upsertData.start_date = start_date;
+  if (finish_date !== undefined) upsertData.finish_date = finish_date;
+  if (rating !== undefined) upsertData.rating = rating;
+  if (review !== undefined) upsertData.review = review;
+  if (favorite_quote !== undefined) upsertData.favorite_quote = favorite_quote;
+
   // Upsert — update if progress already exists for this user+book
   const { data, error } = await supabaseAdmin
     .from('progress')
-    .upsert(
-      {
-        user_id: req.userId,
-        book_id,
-        position: String(position),
-        percentage,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,book_id' }
-    )
+    .upsert(upsertData, { onConflict: 'user_id,book_id' })
     .select()
     .single();
 

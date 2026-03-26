@@ -5,7 +5,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import { healthRouter, authRouter, libraryRouter, booksRouter, progressRouter, clubsRouter, discussionsRouter, filesRouter, gutenbergRouter, statsRouter, coversRouter } from './routes';
+import { healthRouter, authRouter, libraryRouter, booksRouter, progressRouter, clubsRouter, discussionsRouter, filesRouter, gutenbergRouter, statsRouter, coversRouter, wishlistRouter } from './routes';
 import { errorHandler } from './middleware';
 
 const app = express();
@@ -29,6 +29,7 @@ app.use(filesRouter);
 app.use(gutenbergRouter);
 app.use(statsRouter);
 app.use(coversRouter);
+app.use(wishlistRouter);
 
 // Error handling
 app.use(errorHandler);

@@ -32,7 +32,15 @@ export interface Book {
   cover_url: string | null;
   file_path: string;
   type: BookType;
+  genre: string | null;
+  page_count: number | null;
+  description: string | null;
+  publisher: string | null;
+  series_name: string | null;
+  series_number: number | null;
 }
+
+export type ReadingStatus = 'want_to_read' | 'reading' | 'finished' | 'dnf';
 
 export interface Progress {
   id: string;
@@ -41,6 +49,26 @@ export interface Progress {
   position: string;
   percentage: number;
   updated_at: string;
+  status: ReadingStatus;
+  start_date: string | null;
+  finish_date: string | null;
+  rating: number | null;
+  review: string | null;
+  favorite_quote: string | null;
+}
+
+export type WishlistPriority = 'low' | 'medium' | 'high';
+
+export interface Wishlist {
+  id: string;
+  user_id: string;
+  title: string;
+  author: string;
+  cover_url: string | null;
+  genre: string | null;
+  priority: WishlistPriority;
+  notes: string | null;
+  added_at: string;
 }
 
 export interface Club {

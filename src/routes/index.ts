@@ -9,3 +9,4 @@ export { filesRouter } from './files';
 export { gutenbergRouter } from './gutenberg';
 export { statsRouter } from './stats';
 export { coversRouter } from './covers';
+export { wishlistRouter } from './wishlist';

@@ -30,13 +30,19 @@ booksRouter.get('/api/v1/books/:id', requireAuth, async (req: Request, res: Resp
 // PATCH /api/v1/books/:id — update book
 booksRouter.patch('/api/v1/books/:id', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { title, author, cover_url, type } = req.body;
+  const { title, author, cover_url, type, genre, page_count, description, publisher, series_name, series_number } = req.body;
 
   const updates: Record<string, unknown> = {};
   if (title !== undefined) updates.title = title;
   if (author !== undefined) updates.author = author;
   if (cover_url !== undefined) updates.cover_url = cover_url;
   if (type !== undefined) updates.type = type;
+  if (genre !== undefined) updates.genre = genre;
+  if (page_count !== undefined) updates.page_count = page_count;
+  if (description !== undefined) updates.description = description;
+  if (publisher !== undefined) updates.publisher = publisher;
+  if (series_name !== undefined) updates.series_name = series_name;
+  if (series_number !== undefined) updates.series_number = series_number;
 
   if (Object.keys(updates).length === 0) {
     sendError(res, 'No fields to update', 400);
