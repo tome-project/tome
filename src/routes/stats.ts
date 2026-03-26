@@ -300,6 +300,41 @@ statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res
       }
     }
 
+    // Reading time from reading_sessions
+    const nowDate = new Date();
+
+    const dashStartOfWeek = new Date(nowDate);
+    const dashDay = dashStartOfWeek.getDay();
+    const dashDiff = dashDay === 0 ? 6 : dashDay - 1;
+    dashStartOfWeek.setDate(dashStartOfWeek.getDate() - dashDiff);
+    dashStartOfWeek.setHours(0, 0, 0, 0);
+
+    const dashStartOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
+
+    const { data: readingSessions, error: sessionsError } = await supabaseAdmin
+      .from('reading_sessions')
+      .select('duration_minutes, started_at')
+      .eq('user_id', userId)
+      .not('duration_minutes', 'is', null)
+      .gte('started_at', dashStartOfMonth.toISOString());
+
+    if (sessionsError) {
+      sendError(res, sessionsError.message, 500);
+      return;
+    }
+
+    let reading_time_this_month = 0;
+    let reading_time_this_week = 0;
+
+    for (const s of readingSessions || []) {
+      const duration = s.duration_minutes as number;
+      reading_time_this_month += duration;
+
+      if (new Date(s.started_at) >= dashStartOfWeek) {
+        reading_time_this_week += duration;
+      }
+    }
+
     sendSuccess(res, {
       monthly_books,
       genre_breakdown,
@@ -307,6 +342,8 @@ statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res
       average_rating,
       reading_status_counts,
       books_by_format,
+      reading_time_this_month,
+      reading_time_this_week,
     });
   } catch (_e) {
     sendError(res, 'Failed to fetch dashboard stats', 500);

@@ -10,3 +10,6 @@ export { gutenbergRouter } from './gutenberg';
 export { statsRouter } from './stats';
 export { coversRouter } from './covers';
 export { wishlistRouter } from './wishlist';
+export { highlightsRouter } from './highlights';
+export { readingSessionsRouter } from './reading-sessions';
+export { activityRouter } from './activity';
