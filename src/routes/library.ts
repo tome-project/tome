@@ -153,6 +153,112 @@ libraryRouter.post(
   }
 );
 
+// POST /api/v1/library/seed — seed library with classic Gutenberg books
+libraryRouter.post('/api/v1/library/seed', requireAuth, async (req: Request, res: Response) => {
+  const SEED_BOOKS = [
+    { id: 1342, title: 'Pride and Prejudice' },
+    { id: 84, title: 'Frankenstein' },
+    { id: 64317, title: 'The Great Gatsby' },
+    { id: 11, title: "Alice's Adventures in Wonderland" },
+    { id: 345, title: 'Dracula' },
+  ];
+
+  const GUTENBERG_API = 'https://gutendex.com';
+
+  try {
+    // Check which books already exist in the library (by gutenberg file path pattern)
+    const { data: existingBooks, error: fetchError } = await supabaseAdmin
+      .from('books')
+      .select('file_path');
+
+    if (fetchError) {
+      sendError(res, fetchError.message, 500);
+      return;
+    }
+
+    const existingPaths = new Set(
+      (existingBooks || []).map((b: { file_path: string }) => b.file_path)
+    );
+
+    // Ensure the gutenberg download directory exists
+    const gutenbergDir = path.join(libraryPath, 'gutenberg');
+    if (!fs.existsSync(gutenbergDir)) {
+      fs.mkdirSync(gutenbergDir, { recursive: true });
+    }
+
+    const added: string[] = [];
+    const errors: string[] = [];
+
+    for (const seed of SEED_BOOKS) {
+      const filename = `gutenberg-${seed.id}.epub`;
+      const relativePath = `gutenberg/${filename}`;
+
+      // Skip if already in library
+      if (existingPaths.has(relativePath)) {
+        continue;
+      }
+
+      try {
+        // Fetch book metadata from Gutendex API
+        const metaResponse = await fetch(`${GUTENBERG_API}/books/${seed.id}`);
+        if (!metaResponse.ok) {
+          errors.push(`Failed to fetch metadata for ${seed.title}`);
+          continue;
+        }
+
+        const meta = await metaResponse.json() as any;
+        const epubUrl = meta.formats?.['application/epub+zip'];
+        const coverUrl = meta.formats?.['image/jpeg'] || null;
+        const author = meta.authors?.[0]?.name || 'Unknown';
+        const title = meta.title || seed.title;
+
+        if (!epubUrl) {
+          errors.push(`No epub URL found for ${seed.title}`);
+          continue;
+        }
+
+        // Download the epub file
+        const filePath = path.join(gutenbergDir, filename);
+        const epubResponse = await fetch(epubUrl);
+        if (!epubResponse.ok) {
+          errors.push(`Failed to download epub for ${seed.title}`);
+          continue;
+        }
+
+        const buffer = Buffer.from(await epubResponse.arrayBuffer());
+        await fs.promises.writeFile(filePath, buffer);
+
+        // Insert book record into the database
+        const { error: insertError } = await supabaseAdmin
+          .from('books')
+          .insert({
+            title,
+            author,
+            cover_url: coverUrl,
+            file_path: relativePath,
+            type: 'epub',
+            added_by: req.userId,
+          });
+
+        if (insertError) {
+          errors.push(`Failed to save ${seed.title}: ${insertError.message}`);
+          continue;
+        }
+
+        added.push(title);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Unknown error';
+        errors.push(`Failed to process ${seed.title}: ${message}`);
+      }
+    }
+
+    sendSuccess(res, { added: added.length, titles: added, errors });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to seed library';
+    sendError(res, message, 500);
+  }
+});
+
 // POST /api/v1/library/scan — scan the library directory for new books
 libraryRouter.post('/api/v1/library/scan', requireAuth, async (_req: Request, res: Response) => {
   const bookExtensions = new Set(['.epub', '.mp3', '.m4a', '.m4b']);
