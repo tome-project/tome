@@ -83,3 +83,59 @@ progressRouter.get('/api/v1/progress/:bookId', requireAuth, async (req: Request,
 
   sendSuccess(res, data);
 });
+
+// GET /api/v1/progress/:bookId/tracker — get tracker fields
+progressRouter.get('/api/v1/progress/:bookId/tracker', requireAuth, async (req: Request, res: Response) => {
+  const { bookId } = req.params;
+
+  const { data, error } = await supabaseAdmin
+    .from('progress')
+    .select('status, rating, review, favorite_quote, start_date, finish_date')
+    .eq('user_id', req.userId!)
+    .eq('book_id', bookId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') {
+      sendSuccess(res, { status: null, rating: null, review: null, favorite_quote: null });
+      return;
+    }
+    sendError(res, error.message, 500);
+    return;
+  }
+
+  sendSuccess(res, data);
+});
+
+// PATCH /api/v1/progress/:bookId/tracker — update tracker fields
+progressRouter.patch('/api/v1/progress/:bookId/tracker', requireAuth, async (req: Request, res: Response) => {
+  const { bookId } = req.params;
+  const { rating, status, review, favorite_quote, start_date, finish_date } = req.body;
+
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (rating !== undefined) updates.rating = rating;
+  if (status !== undefined) updates.status = status;
+  if (review !== undefined) updates.review = review;
+  if (favorite_quote !== undefined) updates.favorite_quote = favorite_quote;
+  if (start_date !== undefined) updates.start_date = start_date;
+  if (finish_date !== undefined) updates.finish_date = finish_date;
+
+  const { data: result, error: upsertError } = await supabaseAdmin
+    .from('progress')
+    .upsert({
+      user_id: req.userId,
+      book_id: bookId,
+      position: '0',
+      percentage: 0,
+      ...updates,
+    }, { onConflict: 'user_id,book_id' })
+    .select()
+    .single();
+
+  if (upsertError) {
+    sendError(res, upsertError.message, 500);
+    return;
+  }
+
+  sendSuccess(res, result);
+});
