@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { supabase } from '../services/supabase';
+import { supabase, supabaseAdmin } from '../services/supabase';
 import { sendSuccess, sendError } from '../utils';
 
 export const authRouter = Router();
@@ -13,26 +13,32 @@ authRouter.post('/api/v1/auth/register', async (req: Request, res: Response) => 
     return;
   }
 
-  const { data, error } = await supabase.auth.signUp({
+  // Use admin API to create user (auto-confirms email)
+  const { data: adminData, error: adminError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
-    options: {
-      data: { display_name: display_name || email.split('@')[0] },
-    },
+    email_confirm: true,
+    user_metadata: { display_name: display_name || email.split('@')[0] },
   });
 
-  if (error) {
-    sendError(res, error.message);
+  if (adminError) {
+    sendError(res, adminError.message);
     return;
   }
 
+  // Sign in immediately to get a session token
+  const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
   sendSuccess(res, {
     user: {
-      id: data.user?.id,
-      email: data.user?.email,
-      display_name: data.user?.user_metadata?.display_name,
+      id: adminData.user?.id,
+      email: adminData.user?.email,
+      display_name: adminData.user?.user_metadata?.display_name,
     },
-    session: data.session,
+    session: loginError ? null : loginData.session,
   }, 201);
 });
 
