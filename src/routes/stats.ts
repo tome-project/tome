@@ -300,6 +300,43 @@ statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res
       }
     }
 
+    // Calculate current streak
+    const { data: progressDates, error: streakError } = await supabaseAdmin
+      .from('progress')
+      .select('updated_at')
+      .eq('user_id', userId)
+      .order('updated_at', { ascending: false });
+
+    if (streakError) {
+      sendError(res, streakError.message, 500);
+      return;
+    }
+
+    let day_streak = 0;
+    if (progressDates && progressDates.length > 0) {
+      const uniqueDays = [
+        ...new Set(
+          progressDates.map((p: any) =>
+            new Date(p.updated_at).toISOString().slice(0, 10)
+          )
+        ),
+      ].sort((a, b) => b.localeCompare(a));
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const checkDate = new Date(today);
+
+      for (const day of uniqueDays) {
+        const dateStr = checkDate.toISOString().slice(0, 10);
+        if (day === dateStr) {
+          day_streak++;
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else if (day < dateStr) {
+          break;
+        }
+      }
+    }
+
     // Reading time from reading_sessions
     const nowDate = new Date();
 
@@ -344,6 +381,7 @@ statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res
       books_by_format,
       reading_time_this_month,
       reading_time_this_week,
+      day_streak,
     });
   } catch (_e) {
     sendError(res, 'Failed to fetch dashboard stats', 500);

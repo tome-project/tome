@@ -45,9 +45,10 @@ const upload = multer({
 
 export const libraryRouter = Router();
 
-// GET /api/v1/library — list books with optional search/filter
+// GET /api/v1/library — list books across all accessible libraries
 libraryRouter.get('/api/v1/library', requireAuth, async (req: Request, res: Response) => {
-  const { q, type, page } = req.query;
+  const userId = req.userId!;
+  const { q, type, page, library_id } = req.query;
   const limit = 50;
   const offset = page ? (Number(page) - 1) * limit : 0;
 
@@ -56,6 +57,34 @@ libraryRouter.get('/api/v1/library', requireAuth, async (req: Request, res: Resp
     .select('*', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
+
+  if (library_id && typeof library_id === 'string') {
+    // Filter to a specific library
+    query = query.eq('library_id', library_id);
+  } else {
+    // Get all accessible library IDs for this user
+    const { data: ownedLibs } = await supabaseAdmin
+      .from('libraries')
+      .select('id')
+      .eq('owner_id', userId);
+
+    const { data: memberLibs } = await supabaseAdmin
+      .from('library_members')
+      .select('library_id')
+      .eq('user_id', userId)
+      .eq('role', 'member');
+
+    const accessibleIds = [
+      ...(ownedLibs || []).map((l: { id: string }) => l.id),
+      ...(memberLibs || []).map((m: { library_id: string }) => m.library_id),
+    ];
+
+    // Show books in accessible libraries OR legacy books with no library
+    if (accessibleIds.length > 0) {
+      query = query.or(`library_id.in.(${accessibleIds.join(',')}),library_id.is.null`);
+    }
+    // If no libraries exist yet, just show all books (backwards compat)
+  }
 
   // Text search across title and author
   if (q && typeof q === 'string') {
@@ -77,9 +106,9 @@ libraryRouter.get('/api/v1/library', requireAuth, async (req: Request, res: Resp
   sendSuccess(res, { books: data, total: count });
 });
 
-// POST /api/v1/library/books — add a book to the library
+// POST /api/v1/library/books — add a book to a library
 libraryRouter.post('/api/v1/library/books', requireAuth, async (req: Request, res: Response) => {
-  const { title, author, cover_url, file_path, type } = req.body;
+  const { title, author, cover_url, file_path, type, library_id } = req.body;
 
   if (!title || !author || !file_path || !type) {
     sendError(res, 'title, author, file_path, and type are required');
@@ -99,6 +128,7 @@ libraryRouter.post('/api/v1/library/books', requireAuth, async (req: Request, re
       cover_url: cover_url || null,
       file_path,
       type,
+      library_id: library_id || null,
       added_by: req.userId,
     })
     .select()

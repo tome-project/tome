@@ -30,6 +30,8 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     return;
   }
 
+  const today = new Date().toISOString().slice(0, 10);
+
   const upsertData: Record<string, unknown> = {
     user_id: req.userId,
     book_id,
@@ -38,7 +40,31 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     updated_at: new Date().toISOString(),
   };
 
-  if (status !== undefined) upsertData.status = status;
+  // Auto-manage reading status based on progress
+  if (status !== undefined) {
+    upsertData.status = status;
+  } else if (percentage >= 100) {
+    upsertData.status = 'finished';
+    upsertData.finish_date = finish_date ?? today;
+  } else if (percentage > 0) {
+    // Only upgrade to 'reading' if not already in a terminal state
+    const { data: existing } = await supabaseAdmin
+      .from('progress')
+      .select('status, start_date')
+      .eq('user_id', req.userId!)
+      .eq('book_id', book_id)
+      .single();
+
+    const currentStatus = existing?.status;
+    if (!currentStatus || currentStatus === 'want_to_read') {
+      upsertData.status = 'reading';
+    }
+    // Auto-set start_date on first read
+    if (!existing?.start_date) {
+      upsertData.start_date = start_date ?? today;
+    }
+  }
+
   if (start_date !== undefined) upsertData.start_date = start_date;
   if (finish_date !== undefined) upsertData.finish_date = finish_date;
   if (rating !== undefined) upsertData.rating = rating;

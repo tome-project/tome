@@ -11,17 +11,20 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.0",
+    "better-sqlite3": "^12.9.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "epub2": "^3.0.2",
     "express": "^4.21.2",
     "express-rate-limit": "^8.3.1",
+    "fast-xml-parser": "^5.5.12",
     "helmet": "^8.0.0",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
     "sharp": "^0.34.5"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/morgan": "^1.9.9",

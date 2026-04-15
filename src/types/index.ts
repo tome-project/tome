@@ -19,14 +19,28 @@ export interface Library {
   owner_id: string;
   name: string;
   description: string | null;
+  invite_code: string | null;
   is_public: boolean;
+  created_at: string;
+}
+
+export type LibraryMemberRole = 'owner' | 'member';
+
+export interface LibraryMember {
+  id: string;
+  library_id: string;
+  user_id: string;
+  role: LibraryMemberRole;
+  joined_at: string;
 }
 
 export type BookType = 'epub' | 'audiobook';
 
+export type ExternalSource = 'audiobookshelf' | 'gutenberg' | 'upload' | 'scan' | 'calibre' | 'opds';
+
 export interface Book {
   id: string;
-  library_id: string;
+  library_id: string | null;
   title: string;
   author: string;
   cover_url: string | null;
@@ -38,6 +52,8 @@ export interface Book {
   publisher: string | null;
   series_name: string | null;
   series_number: number | null;
+  external_id: string | null;
+  external_source: ExternalSource | null;
 }
 
 export type ReadingStatus = 'want_to_read' | 'reading' | 'finished' | 'dnf';
