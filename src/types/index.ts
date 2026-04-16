@@ -5,7 +5,10 @@ export interface ApiResponse<T = unknown> {
   error?: string;
 }
 
-// Core data models
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
 export interface User {
   id: string;
   email: string;
@@ -13,109 +16,6 @@ export interface User {
   avatar_url: string | null;
   created_at: string;
 }
-
-export interface Library {
-  id: string;
-  owner_id: string;
-  name: string;
-  description: string | null;
-  invite_code: string | null;
-  is_public: boolean;
-  created_at: string;
-}
-
-export type LibraryMemberRole = 'owner' | 'member';
-
-export interface LibraryMember {
-  id: string;
-  library_id: string;
-  user_id: string;
-  role: LibraryMemberRole;
-  joined_at: string;
-}
-
-export type BookType = 'epub' | 'audiobook';
-
-export type ExternalSource = 'audiobookshelf' | 'gutenberg' | 'upload' | 'scan' | 'calibre' | 'opds';
-
-export interface Book {
-  id: string;
-  library_id: string | null;
-  title: string;
-  author: string;
-  cover_url: string | null;
-  file_path: string;
-  type: BookType;
-  genre: string | null;
-  page_count: number | null;
-  description: string | null;
-  publisher: string | null;
-  series_name: string | null;
-  series_number: number | null;
-  external_id: string | null;
-  external_source: ExternalSource | null;
-}
-
-export type ReadingStatus = 'want_to_read' | 'reading' | 'finished' | 'dnf';
-
-export interface Progress {
-  id: string;
-  user_id: string;
-  book_id: string;
-  position: string;
-  percentage: number;
-  updated_at: string;
-  status: ReadingStatus;
-  start_date: string | null;
-  finish_date: string | null;
-  rating: number | null;
-  review: string | null;
-  favorite_quote: string | null;
-}
-
-export type WishlistPriority = 'low' | 'medium' | 'high';
-
-export interface Wishlist {
-  id: string;
-  user_id: string;
-  title: string;
-  author: string;
-  cover_url: string | null;
-  genre: string | null;
-  priority: WishlistPriority;
-  notes: string | null;
-  added_at: string;
-}
-
-export interface Club {
-  id: string;
-  book_id: string;
-  host_id: string;
-  name: string;
-  invite_code: string;
-  start_date: string;
-  end_date: string;
-}
-
-export interface ClubMember {
-  id: string;
-  club_id: string;
-  user_id: string;
-  joined_at: string;
-}
-
-export interface Discussion {
-  id: string;
-  club_id: string;
-  user_id: string;
-  chapter: number;
-  content: string;
-  created_at: string;
-}
-
-// ---------------------------------------------------------------------------
-// Phase 0 schema additions
-// ---------------------------------------------------------------------------
 
 export type Privacy = 'public' | 'circle' | 'private';
 
@@ -141,4 +41,129 @@ export interface PublicProfile {
   display_name: string;
   bio: string | null;
   avatar_url: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Friendships
+// ---------------------------------------------------------------------------
+
+export type FriendshipStatus = 'pending' | 'accepted' | 'blocked';
+
+export interface Friendship {
+  id: string;
+  user_a_id: string;
+  user_b_id: string;
+  status: FriendshipStatus;
+  requested_by: string;
+  requested_at: string;
+  accepted_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+export interface Book {
+  id: string;
+  open_library_id: string | null;
+  isbn_13: string | null;
+  isbn_10: string | null;
+  google_books_id: string | null;
+  title: string;
+  subtitle: string | null;
+  authors: string[];
+  cover_url: string | null;
+  description: string | null;
+  publisher: string | null;
+  published_year: number | null;
+  page_count: number | null;
+  genres: string[];
+  language: string;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// User ↔ book relationship + reading state
+// ---------------------------------------------------------------------------
+
+export type UserBookStatus = 'want' | 'reading' | 'finished' | 'dnf';
+
+export interface UserBook {
+  id: string;
+  user_id: string;
+  book_id: string;
+  status: UserBookStatus;
+  rating: number | null;
+  review: string | null;
+  review_privacy: Privacy | null;
+  favorite_quote: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  privacy: Privacy;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReadingProgress {
+  id: string;
+  user_id: string;
+  book_id: string;
+  position: string;
+  percentage: number;
+  source_kind: string | null;
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Book sources (file providers)
+// ---------------------------------------------------------------------------
+
+export type BookSourceKind = 'upload' | 'gutenberg' | 'audiobookshelf' | 'calibre' | 'opds';
+export type MediaType = 'epub' | 'audiobook';
+
+export interface BookSource {
+  id: string;
+  book_id: string;
+  owner_id: string;
+  kind: BookSourceKind;
+  media_type: MediaType;
+  file_path: string | null;
+  external_id: string | null;
+  external_url: string | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Clubs
+// ---------------------------------------------------------------------------
+
+export type ClubMemberRole = 'host' | 'moderator' | 'member';
+
+export interface Club {
+  id: string;
+  book_id: string;
+  host_id: string;
+  name: string;
+  invite_code: string;
+  start_date: string;
+  end_date: string | null;
+  created_at: string;
+}
+
+export interface ClubMember {
+  id: string;
+  club_id: string;
+  user_id: string;
+  role: ClubMemberRole;
+  joined_at: string;
+}
+
+export interface Discussion {
+  id: string;
+  club_id: string;
+  user_id: string;
+  chapter: number;
+  content: string;
+  parent_id: string | null;
+  created_at: string;
 }
