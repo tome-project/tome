@@ -130,6 +130,31 @@ export interface BookSource {
   file_path: string | null;
   external_id: string | null;
   external_url: string | null;
+  media_server_id: string | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Media servers (Phase 1) — persistent connections with encrypted tokens
+// ---------------------------------------------------------------------------
+
+export type MediaServerKind = 'audiobookshelf' | 'calibre' | 'opds' | 'plex';
+
+export interface MediaServer {
+  id: string;
+  owner_id: string;
+  name: string;
+  kind: MediaServerKind;
+  url: string;
+  last_sync_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ServerShare {
+  id: string;
+  media_server_id: string;
+  grantee_id: string;
   created_at: string;
 }
 

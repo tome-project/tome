@@ -8,58 +8,68 @@ import {
   absPublishedYear,
   type ABSLibraryItem,
 } from '../services/audiobookshelf';
+import { decryptToken } from '../services/crypto';
 import { ensureMinimalCatalogBook } from '../services/catalog';
 
 export const audiobookshelfRouter = Router();
 
-// POST /api/v1/abs/connect — test connection and list ABS libraries
-audiobookshelfRouter.post('/api/v1/abs/connect', requireAuth, async (req: Request, res: Response) => {
-  const { url, token } = req.body ?? {};
-  if (!url || !token) {
-    sendError(res, 'Audiobookshelf URL and API token are required');
-    return;
-  }
-
-  try {
-    const abs = new AudiobookshelfService(url, token);
-    const libraries = await abs.getLibraries();
-    sendSuccess(res, {
-      connected: true,
-      libraries: libraries.map((lib) => ({
-        id: lib.id,
-        name: lib.name,
-        mediaType: lib.mediaType,
-        folders: lib.folders?.map((f) => f.fullPath).filter(Boolean) ?? [],
-      })),
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to connect';
-    sendError(res, `Could not connect to Audiobookshelf: ${message}`, 502);
-  }
-});
-
-// POST /api/v1/abs/sync — sync an ABS library into the catalog + book_sources.
+// POST /api/v1/abs/sync — sync an ABS library into the catalog + book_sources,
+// using the caller's stored media_server row (Phase 1).
 //
-// Body: { abs_url, abs_token, abs_library_id, add_to_library?: boolean }
+// Body: { server_id, abs_library_id, add_to_library?: boolean }
 //
-// For each item:
-//   1. Ensure a catalog entry — ISBN-first, falls back to minimal insert
-//   2. Upsert a book_sources row (kind='audiobookshelf', owner_id=me)
-//   3. Optionally add to the caller's library with status='want'
+// Per item:
+//   1. Ensure a catalog entry (ISBN-first via importBook, else minimal insert)
+//   2. Upsert a book_sources row (kind='audiobookshelf', owner_id=me,
+//      media_server_id=server_id) — unique per (book, owner, kind)
+//   3. Optionally auto-add to the caller's library with status='want'
 //
-// Credentials stay in the request body for now; the media_servers table that
-// persists them per-user (encrypted) ships with Phase 1.
+// Credentials are no longer passed in the request body; they live encrypted
+// on media_servers.token_encrypted and are decrypted here for the call.
 audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
-  const { abs_url, abs_token, abs_library_id, add_to_library } = req.body ?? {};
+  const { server_id, abs_library_id, add_to_library } = req.body ?? {};
 
-  if (!abs_url || !abs_token || !abs_library_id) {
-    sendError(res, 'abs_url, abs_token, and abs_library_id are required');
+  if (!server_id || typeof server_id !== 'string') {
+    sendError(res, 'server_id is required (register via POST /api/v1/servers first)');
+    return;
+  }
+  if (!abs_library_id || typeof abs_library_id !== 'string') {
+    sendError(res, 'abs_library_id is required');
+    return;
+  }
+
+  // Fetch + ownership check
+  const { data: server, error: serverErr } = await supabaseAdmin
+    .from('media_servers')
+    .select('*')
+    .eq('id', server_id)
+    .eq('owner_id', me)
+    .maybeSingle();
+  if (serverErr) {
+    sendError(res, serverErr.message, 500);
+    return;
+  }
+  if (!server) {
+    sendError(res, 'Server not found', 404);
+    return;
+  }
+  if (server.kind !== 'audiobookshelf') {
+    sendError(res, `Server is kind='${server.kind}', not audiobookshelf`, 400);
+    return;
+  }
+
+  let token: string;
+  try {
+    token = decryptToken(server.token_encrypted as string);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Token decryption failed';
+    sendError(res, message, 500);
     return;
   }
 
   try {
-    const abs = new AudiobookshelfService(abs_url, abs_token);
+    const abs = new AudiobookshelfService(server.url as string, token);
     const items = await abs.getLibraryItems(abs_library_id);
 
     let added = 0;
@@ -74,7 +84,6 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
         const title = meta.title || 'Unknown Title';
         const primaryAuthor = meta.authorName ?? 'Unknown';
 
-        // 1. Catalog entry
         const catalogBook = await ensureMinimalCatalogBook({
           title,
           authors: meta.authorName ? [meta.authorName] : [],
@@ -87,8 +96,6 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
           isbn: meta.isbn ?? null,
         });
 
-        // 2. Source row. Unique on (book_id, owner_id, kind), so re-syncs just
-        //    update the external_id/url — no duplicates.
         const { data: source, error: sourceErr } = await supabaseAdmin
           .from('book_sources')
           .upsert(
@@ -98,7 +105,8 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
               kind: 'audiobookshelf',
               media_type,
               external_id: item.id,
-              external_url: abs_url,
+              external_url: server.url,
+              media_server_id: server.id,
             },
             { onConflict: 'book_id,owner_id,kind' }
           )
@@ -109,7 +117,6 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
           continue;
         }
 
-        // 3. Optional library add
         if (add_to_library !== false) {
           await supabaseAdmin
             .from('user_books')
@@ -119,7 +126,7 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
             );
         }
 
-        const wasNew = new Date(source.created_at).getTime() > Date.now() - 5_000;
+        const wasNew = new Date(source.created_at as string).getTime() > Date.now() - 5_000;
         if (wasNew) added++;
         else reused++;
 
@@ -130,7 +137,14 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
       }
     }
 
+    // Stamp last_sync_at on the server row for the UI
+    await supabaseAdmin
+      .from('media_servers')
+      .update({ last_sync_at: new Date().toISOString() })
+      .eq('id', server.id);
+
     sendSuccess(res, {
+      server_id: server.id,
       total_in_abs: items.length,
       added,
       reused,
