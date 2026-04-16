@@ -1,9 +1,17 @@
 export { supabase, supabaseAdmin } from './supabase';
 export { extractEpubMetadata } from './epub-metadata';
 export type { EpubMetadata } from './epub-metadata';
-export { AudiobookshelfService } from './audiobookshelf';
-export type { ABSLibraryItem, ABSSyncResult } from './audiobookshelf';
-export { getCalibreBooks } from './calibre';
-export type { CalibreBook } from './calibre';
-export { parseFeed } from './opds';
-export type { OPDSFeed, OPDSEntry, OPDSLink } from './opds';
+export { AudiobookshelfService, absMediaType, absPublishedYear } from './audiobookshelf';
+export type { ABSLibraryItem, ABSLibrary } from './audiobookshelf';
+export {
+  searchOpenLibrary,
+  importBook,
+  getCatalogBook,
+  ensureMinimalCatalogBook,
+} from './catalog';
+export type {
+  CatalogBook,
+  CatalogSearchResult,
+  ImportInput,
+  MinimalBookInput,
+} from './catalog';

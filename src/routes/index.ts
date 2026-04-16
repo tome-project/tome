@@ -14,8 +14,6 @@ export { activityRouter } from './activity';
 export { goalsRouter } from './goals';
 export { searchRouter } from './search';
 export { audiobookshelfRouter } from './audiobookshelf';
-export { calibreRouter } from './calibre';
-export { opdsRouter } from './opds';
 export { catalogRouter } from './catalog';
 export { profilesRouter } from './profiles';
 export { friendshipsRouter } from './friendships';

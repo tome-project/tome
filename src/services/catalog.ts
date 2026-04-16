@@ -321,3 +321,80 @@ export async function getCatalogBook(id: string): Promise<CatalogBook | null> {
   if (error) throw new Error(error.message);
   return (data as CatalogBook | null) ?? null;
 }
+
+// ---------------------------------------------------------------------------
+// Minimal catalog entry for sources whose metadata doesn't resolve to OL
+// (typical of Audiobookshelf items without ISBNs, Gutenberg items, uploads)
+// ---------------------------------------------------------------------------
+
+export interface MinimalBookInput {
+  title: string;
+  authors?: string[];
+  subtitle?: string | null;
+  description?: string | null;
+  publisher?: string | null;
+  published_year?: number | null;
+  page_count?: number | null;
+  genres?: string[];
+  language?: string;
+  isbn?: string | null;
+  cover_url?: string | null;
+}
+
+/**
+ * Ensure a catalog row exists for a set of minimal metadata.
+ * Strategy:
+ *   1. If an ISBN is present, try importBook({ isbn }) first — it may resolve
+ *      a full OpenLibrary record and enrich with Google Books.
+ *   2. Otherwise, attempt to match an existing row by (title, first author)
+ *      to avoid duplicates when two sources describe the same book.
+ *   3. Failing that, insert a new minimal row.
+ */
+export async function ensureMinimalCatalogBook(input: MinimalBookInput): Promise<CatalogBook> {
+  if (input.isbn) {
+    try {
+      return await importBook({ isbn: input.isbn });
+    } catch {
+      // fall through to minimal insert
+    }
+  }
+
+  const authors = (input.authors ?? []).filter((a) => a && a.trim().length > 0);
+  const primaryAuthor = authors[0] ?? null;
+
+  if (primaryAuthor) {
+    const { data: existing } = await supabaseAdmin
+      .from('books')
+      .select('*')
+      .eq('title', input.title)
+      .contains('authors', [primaryAuthor])
+      .maybeSingle();
+    if (existing) return existing as CatalogBook;
+  }
+
+  const normalizedIsbn = input.isbn?.replace(/[-\s]/g, '');
+  const record = {
+    open_library_id: null,
+    isbn_13: normalizedIsbn && normalizedIsbn.length === 13 ? normalizedIsbn : null,
+    isbn_10: normalizedIsbn && normalizedIsbn.length === 10 ? normalizedIsbn : null,
+    google_books_id: null,
+    title: input.title,
+    subtitle: input.subtitle ?? null,
+    authors,
+    cover_url: input.cover_url ?? null,
+    description: input.description ?? null,
+    publisher: input.publisher ?? null,
+    published_year: input.published_year ?? null,
+    page_count: input.page_count ?? null,
+    genres: (input.genres ?? []).slice(0, 10),
+    language: input.language ?? 'en',
+  };
+
+  const { data, error } = await supabaseAdmin
+    .from('books')
+    .insert(record)
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to insert minimal catalog book: ${error.message}`);
+  return data as CatalogBook;
+}
