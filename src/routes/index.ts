@@ -19,3 +19,4 @@ export { librariesRouter } from './libraries';
 export { audiobookshelfRouter } from './audiobookshelf';
 export { calibreRouter } from './calibre';
 export { opdsRouter } from './opds';
+export { catalogRouter } from './catalog';
