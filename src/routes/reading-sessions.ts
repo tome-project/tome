@@ -126,7 +126,7 @@ readingSessionsRouter.get('/api/v1/sessions', requireAuth, async (req: Request, 
 
   const { data: books, error: booksError } = await supabaseAdmin
     .from('books')
-    .select('id, title, author')
+    .select('id, title, authors')
     .in('id', bookIds);
 
   if (booksError) {
@@ -141,7 +141,7 @@ readingSessionsRouter.get('/api/v1/sessions', requireAuth, async (req: Request, 
     return {
       ...s,
       book_title: book?.title ?? null,
-      book_author: book?.author ?? null,
+      book_author: (book?.authors as string[] | undefined)?.[0] ?? null,
     };
   });
 

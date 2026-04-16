@@ -46,11 +46,11 @@ discussionsRouter.get(
 
     if (club) {
       const { data: progress } = await supabaseAdmin
-        .from('progress')
+        .from('reading_progress')
         .select('position')
         .eq('user_id', req.userId!)
         .eq('book_id', club.book_id)
-        .single();
+        .maybeSingle();
 
       // If user has progress, filter discussions to chapters they've reached
       // Position format: chapter number or page-based position

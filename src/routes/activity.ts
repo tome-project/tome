@@ -52,32 +52,47 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
   // 4. Get book IDs from clubs for progress filtering
   const clubBookIds = [...new Set((clubs || []).map((c) => c.book_id).filter(Boolean))];
 
-  // 5. Query progress updates — filtered to club books and club members
+  // 5. Progress updates: combine reading_progress (position %) with user_books (status)
+  //    filtered to club books and club members.
   let progressItems: Array<Record<string, unknown>> = [];
   if (clubBookIds.length > 0) {
-    const { data: progressData } = await supabaseAdmin
-      .from('progress')
-      .select('user_id, book_id, status, percentage, updated_at')
-      .in('user_id', memberUserIds)
-      .in('book_id', clubBookIds)
-      .order('updated_at', { ascending: false })
-      .limit(50);
+    const [rpResp, ubResp] = await Promise.all([
+      supabaseAdmin
+        .from('reading_progress')
+        .select('user_id, book_id, percentage, updated_at')
+        .in('user_id', memberUserIds)
+        .in('book_id', clubBookIds)
+        .order('updated_at', { ascending: false })
+        .limit(50),
+      supabaseAdmin
+        .from('user_books')
+        .select('user_id, book_id, status')
+        .in('user_id', memberUserIds)
+        .in('book_id', clubBookIds),
+    ]);
 
-    if (progressData) {
-      // Get book details for progress items
-      const bookIds = [...new Set(progressData.map((p) => p.book_id))];
+    const statusByKey = new Map<string, string>();
+    for (const r of ubResp.data ?? []) {
+      statusByKey.set(`${r.user_id}:${r.book_id}`, r.status as string);
+    }
+
+    const progressData = rpResp.data ?? [];
+    if (progressData.length > 0) {
+      const bookIds = [...new Set(progressData.map((p) => p.book_id as string))];
       const { data: books } = await supabaseAdmin
         .from('books')
         .select('id, title, cover_url')
         .in('id', bookIds);
 
       const bookMap = new Map<string, { title: string; cover_url: string | null }>();
-      for (const book of books || []) {
-        bookMap.set(book.id, { title: book.title, cover_url: book.cover_url });
+      for (const book of books ?? []) {
+        bookMap.set(book.id as string, { title: book.title as string, cover_url: book.cover_url as string | null });
       }
 
       progressItems = progressData.map((p) => {
-        const book = bookMap.get(p.book_id);
+        const book = bookMap.get(p.book_id as string);
+        const pct = Number(p.percentage);
+        const fallbackStatus = pct >= 100 ? 'finished' : pct > 0 ? 'reading' : 'want';
         return {
           type: 'progress',
           user_id: p.user_id,
@@ -85,8 +100,8 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
           data: {
             book_title: book?.title || 'Unknown Book',
             book_cover_url: book?.cover_url || null,
-            status: p.status || (p.percentage >= 100 ? 'finished' : p.percentage > 0 ? 'reading' : 'want_to_read'),
-            percentage: p.percentage,
+            status: statusByKey.get(`${p.user_id}:${p.book_id}`) ?? fallbackStatus,
+            percentage: pct,
           },
         };
       });

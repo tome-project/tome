@@ -81,12 +81,12 @@ goalsRouter.get('/api/v1/goals', requireAuth, async (req: Request, res: Response
     // Books finished this year
     if (goalTypes.includes('books') || goalTypes.includes('pages')) {
       const { data: finishedRows, error: finError } = await supabaseAdmin
-        .from('progress')
+        .from('user_books')
         .select('book_id')
         .eq('user_id', userId)
         .eq('status', 'finished')
-        .gte('finish_date', yearStart)
-        .lte('finish_date', yearEnd);
+        .gte('finished_at', yearStart)
+        .lte('finished_at', yearEnd);
 
       if (finError) {
         sendError(res, finError.message, 500);

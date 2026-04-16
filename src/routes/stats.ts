@@ -5,371 +5,224 @@ import { sendSuccess, sendError } from '../utils';
 
 export const statsRouter = Router();
 
-// GET /api/v1/stats — get user reading stats
+// Streak based on reading_progress.updated_at — a day counts if any progress
+// update happened that day, walking backwards from today.
+async function computeDayStreak(userId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from('reading_progress')
+    .select('updated_at')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false });
+  if (error || !data || data.length === 0) return 0;
+
+  const uniqueDays = [
+    ...new Set(data.map((p) => new Date(p.updated_at).toISOString().slice(0, 10))),
+  ].sort((a, b) => b.localeCompare(a));
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const checkDate = new Date(today);
+
+  let streak = 0;
+  for (const day of uniqueDays) {
+    const dateStr = checkDate.toISOString().slice(0, 10);
+    if (day === dateStr) {
+      streak++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    } else if (day < dateStr) {
+      break;
+    }
+  }
+  return streak;
+}
+
+// GET /api/v1/stats — top-line user stats for the profile header
 statsRouter.get('/api/v1/stats', requireAuth, async (req: Request, res: Response) => {
   const userId = req.userId!;
 
   try {
-    // Count books read (progress >= 100%)
-    const { count: booksRead, error: readError } = await supabaseAdmin
-      .from('progress')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .gte('percentage', 100);
+    const [{ count: booksRead }, { count: booksInProgress }, { count: totalClubs }, current, streak] =
+      await Promise.all([
+        supabaseAdmin
+          .from('user_books')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('status', 'finished'),
+        supabaseAdmin
+          .from('user_books')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('status', 'reading'),
+        supabaseAdmin
+          .from('club_members')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', userId),
+        supabaseAdmin
+          .from('user_books')
+          .select('book_id, updated_at, book:books(id, title, authors, cover_url)')
+          .eq('user_id', userId)
+          .eq('status', 'reading')
+          .order('updated_at', { ascending: false })
+          .limit(5),
+        computeDayStreak(userId),
+      ]);
 
-    if (readError) {
-      sendError(res, readError.message, 500);
-      return;
+    type JoinedRow = {
+      book_id: string;
+      updated_at: string;
+      book:
+        | { id: string; title: string; authors: string[]; cover_url: string | null }
+        | Array<{ id: string; title: string; authors: string[]; cover_url: string | null }>
+        | null;
+    };
+    const currentRows = (current.data ?? []) as unknown as JoinedRow[];
+
+    const bookIds = currentRows.map((r) => r.book_id);
+    const progressByBook = new Map<string, number>();
+    if (bookIds.length > 0) {
+      const { data: progress } = await supabaseAdmin
+        .from('reading_progress')
+        .select('book_id, percentage')
+        .eq('user_id', userId)
+        .in('book_id', bookIds);
+      for (const p of progress ?? []) progressByBook.set(p.book_id as string, Number(p.percentage));
     }
 
-    // Count books in progress (0 < progress < 100%)
-    const { count: booksInProgress, error: progressError } = await supabaseAdmin
-      .from('progress')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .gt('percentage', 0)
-      .lt('percentage', 100);
-
-    if (progressError) {
-      sendError(res, progressError.message, 500);
-      return;
-    }
-
-    // Calculate current streak
-    const { data: progressDates, error: streakError } = await supabaseAdmin
-      .from('progress')
-      .select('updated_at')
-      .eq('user_id', userId)
-      .order('updated_at', { ascending: false });
-
-    if (streakError) {
-      sendError(res, streakError.message, 500);
-      return;
-    }
-
-    let currentStreak = 0;
-    if (progressDates && progressDates.length > 0) {
-      const uniqueDays = [
-        ...new Set(
-          progressDates.map((p: any) =>
-            new Date(p.updated_at).toISOString().slice(0, 10)
-          )
-        ),
-      ].sort((a, b) => b.localeCompare(a));
-
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const checkDate = new Date(today);
-
-      for (const day of uniqueDays) {
-        const dateStr = checkDate.toISOString().slice(0, 10);
-        if (day === dateStr) {
-          currentStreak++;
-          checkDate.setDate(checkDate.getDate() - 1);
-        } else if (day < dateStr) {
-          break;
-        }
-      }
-    }
-
-    // Count clubs
-    const { count: totalClubs, error: clubsError } = await supabaseAdmin
-      .from('club_members')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId);
-
-    if (clubsError) {
-      sendError(res, clubsError.message, 500);
-      return;
-    }
-
-    // Get currently reading books
-    const { data: inProgressRows, error: currentError } = await supabaseAdmin
-      .from('progress')
-      .select('book_id, percentage, updated_at')
-      .eq('user_id', userId)
-      .gt('percentage', 0)
-      .lt('percentage', 100)
-      .order('updated_at', { ascending: false })
-      .limit(5);
-
-    if (currentError) {
-      sendError(res, currentError.message, 500);
-      return;
-    }
-
-    let currentlyReading: any[] = [];
-
-    if (inProgressRows && inProgressRows.length > 0) {
-      const bookIds = inProgressRows.map((r: any) => r.book_id);
-
-      const { data: books, error: booksError } = await supabaseAdmin
-        .from('books')
-        .select('id, title, author, cover_url')
-        .in('id', bookIds);
-
-      if (booksError) {
-        sendError(res, booksError.message, 500);
-        return;
-      }
-
-      const booksMap = new Map((books || []).map((b: any) => [b.id, b]));
-
-      currentlyReading = inProgressRows
-        .map((row: any) => {
-          const book = booksMap.get(row.book_id);
-          if (!book) return null;
-          return {
-            book_id: row.book_id,
-            title: book.title,
-            author: book.author,
-            cover_url: book.cover_url,
-            percentage: row.percentage,
-          };
-        })
-        .filter(Boolean);
-    }
+    const currently_reading = currentRows
+      .map((r) => {
+        const book = Array.isArray(r.book) ? r.book[0] : r.book;
+        if (!book) return null;
+        return {
+          book_id: r.book_id,
+          title: book.title,
+          author: book.authors?.[0] ?? null,
+          cover_url: book.cover_url,
+          percentage: progressByBook.get(r.book_id) ?? 0,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
 
     sendSuccess(res, {
-      books_read: booksRead || 0,
-      books_in_progress: booksInProgress || 0,
-      current_streak: currentStreak,
-      total_clubs: totalClubs || 0,
-      currently_reading: currentlyReading,
+      books_read: booksRead ?? 0,
+      books_in_progress: booksInProgress ?? 0,
+      current_streak: streak,
+      total_clubs: totalClubs ?? 0,
+      currently_reading,
     });
-  } catch (_e) {
+  } catch {
     sendError(res, 'Failed to fetch user stats', 500);
   }
 });
 
-// GET /api/v1/stats/dashboard — rich tracking dashboard
+// GET /api/v1/stats/dashboard — richer dashboard shown on the profile tab
 statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res: Response) => {
   const userId = req.userId!;
 
   try {
-    // Monthly books finished (last 12 months) based on finish_date
+    // Monthly finishes — last 12 months, keyed YYYY-MM
     const twelveMonthsAgo = new Date();
     twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
     const cutoff = twelveMonthsAgo.toISOString().slice(0, 10);
 
-    const { data: finishedRows, error: finishedError } = await supabaseAdmin
-      .from('progress')
-      .select('finish_date')
+    const { data: finishedRows } = await supabaseAdmin
+      .from('user_books')
+      .select('finished_at')
       .eq('user_id', userId)
       .eq('status', 'finished')
-      .not('finish_date', 'is', null)
-      .gte('finish_date', cutoff);
+      .not('finished_at', 'is', null)
+      .gte('finished_at', cutoff);
 
-    if (finishedError) {
-      sendError(res, finishedError.message, 500);
-      return;
-    }
-
-    // Build monthly_books from the last 12 months
     const monthlyCounts: Record<string, number> = {};
     const now = new Date();
     for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = d.toISOString().slice(0, 7);
-      monthlyCounts[key] = 0;
+      monthlyCounts[d.toISOString().slice(0, 7)] = 0;
     }
-    for (const row of finishedRows || []) {
-      const month = (row.finish_date as string).slice(0, 7);
-      if (month in monthlyCounts) {
-        monthlyCounts[month]++;
-      }
+    for (const row of finishedRows ?? []) {
+      const month = (row.finished_at as string).slice(0, 7);
+      if (month in monthlyCounts) monthlyCounts[month]++;
     }
     const monthly_books = Object.entries(monthlyCounts).map(([month, count]) => ({ month, count }));
 
-    // Genre breakdown — join progress with books to get genres for books the user has progress on
-    const { data: progressWithBooks, error: genreError } = await supabaseAdmin
-      .from('progress')
-      .select('book_id')
+    // Genre + page stats: fetch user's book_ids + join catalog for genres/page_count
+    const { data: allUserBooks } = await supabaseAdmin
+      .from('user_books')
+      .select('book_id, status, rating')
       .eq('user_id', userId);
 
-    if (genreError) {
-      sendError(res, genreError.message, 500);
-      return;
-    }
-
-    let genre_breakdown: { genre: string; count: number }[] = [];
-    if (progressWithBooks && progressWithBooks.length > 0) {
-      const bookIds = progressWithBooks.map((r: any) => r.book_id);
-      const { data: booksWithGenre, error: booksGenreError } = await supabaseAdmin
+    const bookIds = [...new Set((allUserBooks ?? []).map((r) => r.book_id as string))];
+    let bookMeta = new Map<string, { genres: string[]; page_count: number | null }>();
+    if (bookIds.length > 0) {
+      const { data: books } = await supabaseAdmin
         .from('books')
-        .select('genre')
-        .in('id', bookIds)
-        .not('genre', 'is', null);
-
-      if (booksGenreError) {
-        sendError(res, booksGenreError.message, 500);
-        return;
-      }
-
-      const genreCounts: Record<string, number> = {};
-      for (const b of booksWithGenre || []) {
-        const g = b.genre as string;
-        genreCounts[g] = (genreCounts[g] || 0) + 1;
-      }
-      genre_breakdown = Object.entries(genreCounts).map(([genre, count]) => ({ genre, count }));
+        .select('id, genres, page_count')
+        .in('id', bookIds);
+      bookMeta = new Map(
+        (books ?? []).map((b) => [
+          b.id as string,
+          { genres: (b.genres as string[]) ?? [], page_count: b.page_count as number | null },
+        ])
+      );
     }
 
-    // Total pages read — sum page_count for finished books
-    const { data: finishedBookIds, error: finBookError } = await supabaseAdmin
-      .from('progress')
-      .select('book_id')
-      .eq('user_id', userId)
-      .eq('status', 'finished');
-
-    if (finBookError) {
-      sendError(res, finBookError.message, 500);
-      return;
+    const genreCounts: Record<string, number> = {};
+    for (const r of allUserBooks ?? []) {
+      const g = bookMeta.get(r.book_id as string)?.genres?.[0];
+      if (g) genreCounts[g] = (genreCounts[g] ?? 0) + 1;
     }
+    const genre_breakdown = Object.entries(genreCounts).map(([genre, count]) => ({ genre, count }));
 
     let total_pages_read = 0;
-    if (finishedBookIds && finishedBookIds.length > 0) {
-      const ids = finishedBookIds.map((r: any) => r.book_id);
-      const { data: finishedBooks, error: pagesError } = await supabaseAdmin
-        .from('books')
-        .select('page_count')
-        .in('id', ids)
-        .not('page_count', 'is', null);
-
-      if (pagesError) {
-        sendError(res, pagesError.message, 500);
-        return;
-      }
-
-      total_pages_read = (finishedBooks || []).reduce((sum: number, b: any) => sum + (b.page_count || 0), 0);
+    for (const r of allUserBooks ?? []) {
+      if (r.status !== 'finished') continue;
+      const pages = bookMeta.get(r.book_id as string)?.page_count;
+      if (pages) total_pages_read += pages;
     }
 
-    // Average rating
-    const { data: ratings, error: ratingsError } = await supabaseAdmin
-      .from('progress')
-      .select('rating')
-      .eq('user_id', userId)
-      .not('rating', 'is', null);
+    const ratings = (allUserBooks ?? []).filter((r) => typeof r.rating === 'number').map((r) => r.rating as number);
+    const average_rating =
+      ratings.length > 0 ? Math.round((ratings.reduce((a, b) => a + b, 0) / ratings.length) * 100) / 100 : null;
 
-    if (ratingsError) {
-      sendError(res, ratingsError.message, 500);
-      return;
+    const reading_status_counts = { want: 0, reading: 0, finished: 0, dnf: 0 };
+    for (const r of allUserBooks ?? []) {
+      const s = r.status as keyof typeof reading_status_counts;
+      if (s in reading_status_counts) reading_status_counts[s]++;
     }
 
-    let average_rating: number | null = null;
-    if (ratings && ratings.length > 0) {
-      const sum = ratings.reduce((acc: number, r: any) => acc + r.rating, 0);
-      average_rating = Math.round((sum / ratings.length) * 100) / 100;
+    // Format breakdown now from the caller's book_sources
+    const { data: ownSources } = await supabaseAdmin
+      .from('book_sources')
+      .select('media_type')
+      .eq('owner_id', userId);
+    const books_by_format: Record<string, number> = { epub: 0, audiobook: 0 };
+    for (const s of ownSources ?? []) {
+      const mt = s.media_type as string;
+      books_by_format[mt] = (books_by_format[mt] ?? 0) + 1;
     }
 
-    // Reading status counts
-    const { data: allProgress, error: statusError } = await supabaseAdmin
-      .from('progress')
-      .select('status')
-      .eq('user_id', userId);
+    const day_streak = await computeDayStreak(userId);
 
-    if (statusError) {
-      sendError(res, statusError.message, 500);
-      return;
-    }
-
-    const reading_status_counts = { want_to_read: 0, reading: 0, finished: 0, dnf: 0 };
-    for (const row of allProgress || []) {
-      const s = row.status as keyof typeof reading_status_counts;
-      if (s in reading_status_counts) {
-        reading_status_counts[s]++;
-      }
-    }
-
-    // Books by format — count book types for books the user has progress on
-    let books_by_format: Record<string, number> = { epub: 0, audiobook: 0 };
-    if (progressWithBooks && progressWithBooks.length > 0) {
-      const bookIds = progressWithBooks.map((r: any) => r.book_id);
-      const { data: booksWithType, error: typeError } = await supabaseAdmin
-        .from('books')
-        .select('type')
-        .in('id', bookIds);
-
-      if (typeError) {
-        sendError(res, typeError.message, 500);
-        return;
-      }
-
-      for (const b of booksWithType || []) {
-        const t = b.type as string;
-        books_by_format[t] = (books_by_format[t] || 0) + 1;
-      }
-    }
-
-    // Calculate current streak
-    const { data: progressDates, error: streakError } = await supabaseAdmin
-      .from('progress')
-      .select('updated_at')
-      .eq('user_id', userId)
-      .order('updated_at', { ascending: false });
-
-    if (streakError) {
-      sendError(res, streakError.message, 500);
-      return;
-    }
-
-    let day_streak = 0;
-    if (progressDates && progressDates.length > 0) {
-      const uniqueDays = [
-        ...new Set(
-          progressDates.map((p: any) =>
-            new Date(p.updated_at).toISOString().slice(0, 10)
-          )
-        ),
-      ].sort((a, b) => b.localeCompare(a));
-
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const checkDate = new Date(today);
-
-      for (const day of uniqueDays) {
-        const dateStr = checkDate.toISOString().slice(0, 10);
-        if (day === dateStr) {
-          day_streak++;
-          checkDate.setDate(checkDate.getDate() - 1);
-        } else if (day < dateStr) {
-          break;
-        }
-      }
-    }
-
-    // Reading time from reading_sessions
+    // Reading time from reading_sessions (this week / this month)
     const nowDate = new Date();
+    const startOfWeek = new Date(nowDate);
+    const diff = startOfWeek.getDay() === 0 ? 6 : startOfWeek.getDay() - 1;
+    startOfWeek.setDate(startOfWeek.getDate() - diff);
+    startOfWeek.setHours(0, 0, 0, 0);
+    const startOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
 
-    const dashStartOfWeek = new Date(nowDate);
-    const dashDay = dashStartOfWeek.getDay();
-    const dashDiff = dashDay === 0 ? 6 : dashDay - 1;
-    dashStartOfWeek.setDate(dashStartOfWeek.getDate() - dashDiff);
-    dashStartOfWeek.setHours(0, 0, 0, 0);
-
-    const dashStartOfMonth = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
-
-    const { data: readingSessions, error: sessionsError } = await supabaseAdmin
+    const { data: sessions } = await supabaseAdmin
       .from('reading_sessions')
       .select('duration_minutes, started_at')
       .eq('user_id', userId)
       .not('duration_minutes', 'is', null)
-      .gte('started_at', dashStartOfMonth.toISOString());
-
-    if (sessionsError) {
-      sendError(res, sessionsError.message, 500);
-      return;
-    }
+      .gte('started_at', startOfMonth.toISOString());
 
     let reading_time_this_month = 0;
     let reading_time_this_week = 0;
-
-    for (const s of readingSessions || []) {
-      const duration = s.duration_minutes as number;
-      reading_time_this_month += duration;
-
-      if (new Date(s.started_at) >= dashStartOfWeek) {
-        reading_time_this_week += duration;
-      }
+    for (const s of sessions ?? []) {
+      const d = s.duration_minutes as number;
+      reading_time_this_month += d;
+      if (new Date(s.started_at as string) >= startOfWeek) reading_time_this_week += d;
     }
 
     sendSuccess(res, {
@@ -383,7 +236,7 @@ statsRouter.get('/api/v1/stats/dashboard', requireAuth, async (req: Request, res
       reading_time_this_week,
       day_streak,
     });
-  } catch (_e) {
+  } catch {
     sendError(res, 'Failed to fetch dashboard stats', 500);
   }
 });
