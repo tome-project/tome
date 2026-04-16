@@ -22,3 +22,4 @@ export { opdsRouter } from './opds';
 export { catalogRouter } from './catalog';
 export { profilesRouter } from './profiles';
 export { friendshipsRouter } from './friendships';
+export { userBooksRouter } from './user-books';
