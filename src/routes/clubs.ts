@@ -112,6 +112,68 @@ clubsRouter.get('/api/v1/clubs/invite/:inviteCode', async (req: Request, res: Re
   sendSuccess(res, data);
 });
 
+// GET /api/v1/clubs/:id — hydrated club detail (club + members with public profiles)
+clubsRouter.get('/api/v1/clubs/:id', requireAuth, async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+
+  const { data: club, error: clubErr } = await supabaseAdmin
+    .from('clubs')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (clubErr) {
+    sendError(res, clubErr.message, 500);
+    return;
+  }
+  if (!club) {
+    sendError(res, 'Club not found', 404);
+    return;
+  }
+
+  // Only members can see club detail (including invite_code).
+  const { data: ownMembership } = await supabaseAdmin
+    .from('club_members')
+    .select('id')
+    .eq('club_id', id)
+    .eq('user_id', req.userId!)
+    .maybeSingle();
+  if (!ownMembership) {
+    sendError(res, 'Not a member of this club', 403);
+    return;
+  }
+
+  const { data: memberRows, error: membersErr } = await supabaseAdmin
+    .from('club_members')
+    .select('id, user_id, role, joined_at')
+    .eq('club_id', id);
+  if (membersErr) {
+    sendError(res, membersErr.message, 500);
+    return;
+  }
+
+  const userIds = (memberRows ?? []).map((m) => m.user_id as string);
+  const profilesById = new Map<string, Record<string, unknown>>();
+  if (userIds.length > 0) {
+    const { data: profiles } = await supabaseAdmin
+      .from('user_profiles')
+      .select('user_id, handle, display_name, avatar_url')
+      .in('user_id', userIds);
+    for (const p of profiles ?? []) {
+      profilesById.set(p.user_id as string, p as Record<string, unknown>);
+    }
+  }
+
+  const members = (memberRows ?? []).map((m) => ({
+    id: m.id,
+    user_id: m.user_id,
+    role: m.role,
+    joined_at: m.joined_at,
+    profile: profilesById.get(m.user_id as string) ?? null,
+  }));
+
+  sendSuccess(res, { club, members });
+});
+
 // POST /api/v1/clubs/:id/join — join a club
 clubsRouter.post('/api/v1/clubs/:id/join', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
