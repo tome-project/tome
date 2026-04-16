@@ -5,163 +5,82 @@ import { sendSuccess, sendError } from '../utils';
 
 export const progressRouter = Router();
 
-// POST /api/v1/progress — save reading progress
+// POST /api/v1/progress — save position/percentage for a book the user is reading.
+// Body: { book_id, position, percentage, source_kind? }
+//
+// Status / rating / review now live on /api/v1/user-books. This route is
+// strictly for streaming position updates from the reader.
+//
+// When percentage hits 100, auto-mark the corresponding user_book as 'finished'
+// (if one exists). We don't auto-create the user_book — adding a book to the
+// library is a deliberate action and goes through POST /api/v1/user-books.
 progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: Response) => {
-  const { book_id, position, percentage, status, start_date, finish_date, rating, review, favorite_quote } = req.body;
+  const me = req.userId!;
+  const { book_id, position, percentage, source_kind } = req.body ?? {};
 
   if (!book_id || position === undefined || percentage === undefined) {
     sendError(res, 'book_id, position, and percentage are required');
     return;
   }
-
-  if (percentage < 0 || percentage > 100) {
+  const pct = Number(percentage);
+  if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
     sendError(res, 'percentage must be between 0 and 100');
     return;
   }
 
-  if (rating !== undefined && (rating < 1 || rating > 5)) {
-    sendError(res, 'rating must be between 1 and 5');
-    return;
-  }
-
-  const validStatuses = ['want_to_read', 'reading', 'finished', 'dnf'];
-  if (status !== undefined && !validStatuses.includes(status)) {
-    sendError(res, `status must be one of: ${validStatuses.join(', ')}`);
-    return;
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-
   const upsertData: Record<string, unknown> = {
-    user_id: req.userId,
+    user_id: me,
     book_id,
     position: String(position),
-    percentage,
+    percentage: pct,
     updated_at: new Date().toISOString(),
   };
+  if (source_kind !== undefined) upsertData.source_kind = source_kind === null ? null : String(source_kind);
 
-  // Auto-manage reading status based on progress
-  if (status !== undefined) {
-    upsertData.status = status;
-  } else if (percentage >= 100) {
-    upsertData.status = 'finished';
-    upsertData.finish_date = finish_date ?? today;
-  } else if (percentage > 0) {
-    // Only upgrade to 'reading' if not already in a terminal state
-    const { data: existing } = await supabaseAdmin
-      .from('progress')
-      .select('status, start_date')
-      .eq('user_id', req.userId!)
-      .eq('book_id', book_id)
-      .single();
-
-    const currentStatus = existing?.status;
-    if (!currentStatus || currentStatus === 'want_to_read') {
-      upsertData.status = 'reading';
-    }
-    // Auto-set start_date on first read
-    if (!existing?.start_date) {
-      upsertData.start_date = start_date ?? today;
-    }
-  }
-
-  if (start_date !== undefined) upsertData.start_date = start_date;
-  if (finish_date !== undefined) upsertData.finish_date = finish_date;
-  if (rating !== undefined) upsertData.rating = rating;
-  if (review !== undefined) upsertData.review = review;
-  if (favorite_quote !== undefined) upsertData.favorite_quote = favorite_quote;
-
-  // Upsert — update if progress already exists for this user+book
   const { data, error } = await supabaseAdmin
-    .from('progress')
+    .from('reading_progress')
     .upsert(upsertData, { onConflict: 'user_id,book_id' })
     .select()
     .single();
-
   if (error) {
     sendError(res, error.message, 500);
     return;
   }
 
+  // Bridge to user_books: on completion, auto-finish. Best-effort; ignore errors.
+  if (pct >= 100) {
+    const today = new Date().toISOString().slice(0, 10);
+    await supabaseAdmin
+      .from('user_books')
+      .update({
+        status: 'finished',
+        finished_at: today,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', me)
+      .eq('book_id', book_id)
+      .neq('status', 'finished');
+  }
+
   sendSuccess(res, data);
 });
 
-// GET /api/v1/progress/:bookId — get progress for a book
+// GET /api/v1/progress/:bookId — current reading position for a book
 progressRouter.get('/api/v1/progress/:bookId', requireAuth, async (req: Request, res: Response) => {
-  const { bookId } = req.params;
+  const me = req.userId!;
+  const bookId = String(req.params.bookId);
 
   const { data, error } = await supabaseAdmin
-    .from('progress')
+    .from('reading_progress')
     .select('*')
-    .eq('user_id', req.userId!)
+    .eq('user_id', me)
     .eq('book_id', bookId)
-    .single();
+    .maybeSingle();
 
   if (error) {
-    if (error.code === 'PGRST116') {
-      // No progress yet — return zero state
-      sendSuccess(res, { book_id: bookId, position: '0', percentage: 0 });
-      return;
-    }
     sendError(res, error.message, 500);
     return;
   }
 
-  sendSuccess(res, data);
-});
-
-// GET /api/v1/progress/:bookId/tracker — get tracker fields
-progressRouter.get('/api/v1/progress/:bookId/tracker', requireAuth, async (req: Request, res: Response) => {
-  const { bookId } = req.params;
-
-  const { data, error } = await supabaseAdmin
-    .from('progress')
-    .select('status, rating, review, favorite_quote, start_date, finish_date')
-    .eq('user_id', req.userId!)
-    .eq('book_id', bookId)
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') {
-      sendSuccess(res, { status: null, rating: null, review: null, favorite_quote: null });
-      return;
-    }
-    sendError(res, error.message, 500);
-    return;
-  }
-
-  sendSuccess(res, data);
-});
-
-// PATCH /api/v1/progress/:bookId/tracker — update tracker fields
-progressRouter.patch('/api/v1/progress/:bookId/tracker', requireAuth, async (req: Request, res: Response) => {
-  const { bookId } = req.params;
-  const { rating, status, review, favorite_quote, start_date, finish_date } = req.body;
-
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  if (rating !== undefined) updates.rating = rating;
-  if (status !== undefined) updates.status = status;
-  if (review !== undefined) updates.review = review;
-  if (favorite_quote !== undefined) updates.favorite_quote = favorite_quote;
-  if (start_date !== undefined) updates.start_date = start_date;
-  if (finish_date !== undefined) updates.finish_date = finish_date;
-
-  const { data: result, error: upsertError } = await supabaseAdmin
-    .from('progress')
-    .upsert({
-      user_id: req.userId,
-      book_id: bookId,
-      position: '0',
-      percentage: 0,
-      ...updates,
-    }, { onConflict: 'user_id,book_id' })
-    .select()
-    .single();
-
-  if (upsertError) {
-    sendError(res, upsertError.message, 500);
-    return;
-  }
-
-  sendSuccess(res, result);
+  sendSuccess(res, data ?? { book_id: bookId, position: '0', percentage: 0 });
 });
