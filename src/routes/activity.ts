@@ -98,6 +98,7 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
           user_id: p.user_id,
           timestamp: p.updated_at,
           data: {
+            book_id: p.book_id,
             book_title: book?.title || 'Unknown Book',
             book_cover_url: book?.cover_url || null,
             status: statusByKey.get(`${p.user_id}:${p.book_id}`) ?? fallbackStatus,
@@ -123,6 +124,7 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
       user_id: d.user_id,
       timestamp: d.created_at,
       data: {
+        club_id: d.club_id,
         club_name: club?.name || 'Unknown Club',
         chapter: d.chapter,
         preview: d.content ? d.content.substring(0, 100) : '',
@@ -138,6 +140,7 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
       user_id: m.user_id,
       timestamp: m.joined_at,
       data: {
+        club_id: m.club_id,
         club_name: club?.name || 'Unknown Club',
       },
     };
