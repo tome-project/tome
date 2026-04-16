@@ -21,10 +21,18 @@ function isPrivacy(v: unknown): v is Privacy {
 // The hydrated row shape the client consumes — user_book joined with the catalog book.
 const SELECT_WITH_BOOK = '*, book:books(*)';
 
-// GET /api/v1/user-books?status=reading
-// List of the current user's library, optionally filtered by status.
+// GET /api/v1/user-books?status=reading&user_id=...
+// List a user's library. Defaults to the caller's own; pass user_id to view
+// another user's shelf with privacy-respecting visibility:
+//   own             → everything
+//   in circle       → public + circle
+//   not in circle   → public only
+// Runs via supabaseAdmin (bypasses RLS), so the visibility check is
+// duplicated here in app code — keep in sync with the RLS policies on
+// user_books if those change.
 userBooksRouter.get('/api/v1/user-books', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
+  const targetUserId = typeof req.query.user_id === 'string' ? req.query.user_id : me;
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
   if (status && !isStatus(status)) {
     sendError(res, 'Invalid status filter');
@@ -34,10 +42,24 @@ userBooksRouter.get('/api/v1/user-books', requireAuth, async (req: Request, res:
   let query = supabaseAdmin
     .from('user_books')
     .select(SELECT_WITH_BOOK)
-    .eq('user_id', me)
+    .eq('user_id', targetUserId)
     .order('updated_at', { ascending: false });
 
   if (status) query = query.eq('status', status);
+
+  if (targetUserId !== me) {
+    const [a, b] = [me, targetUserId].sort();
+    const { data: friendship } = await supabaseAdmin
+      .from('friendships')
+      .select('status')
+      .eq('user_a_id', a)
+      .eq('user_b_id', b)
+      .maybeSingle();
+    const inCircle = friendship?.status === 'accepted';
+    query = inCircle
+      ? query.in('privacy', ['public', 'circle'])
+      : query.eq('privacy', 'public');
+  }
 
   const { data, error } = await query;
   if (error) {
