@@ -6,7 +6,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
-import { healthRouter, authRouter, libraryRouter, booksRouter, progressRouter, clubsRouter, discussionsRouter, filesRouter, gutenbergRouter, statsRouter, coversRouter, wishlistRouter, readingSessionsRouter, highlightsRouter, activityRouter, goalsRouter, searchRouter, librariesRouter, audiobookshelfRouter, calibreRouter, opdsRouter, catalogRouter, profilesRouter } from './routes';
+import { healthRouter, authRouter, libraryRouter, booksRouter, progressRouter, clubsRouter, discussionsRouter, filesRouter, gutenbergRouter, statsRouter, coversRouter, wishlistRouter, readingSessionsRouter, highlightsRouter, activityRouter, goalsRouter, searchRouter, librariesRouter, audiobookshelfRouter, calibreRouter, opdsRouter, catalogRouter, profilesRouter, friendshipsRouter } from './routes';
 import { errorHandler } from './middleware';
 
 const app = express();
@@ -63,6 +63,7 @@ app.use(calibreRouter);
 app.use(opdsRouter);
 app.use(catalogRouter);
 app.use(profilesRouter);
+app.use(friendshipsRouter);
 
 // Error handling
 app.use(errorHandler);
