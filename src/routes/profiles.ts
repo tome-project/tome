@@ -132,6 +132,32 @@ profilesRouter.patch('/api/v1/profiles/me', requireAuth, async (req: Request, re
   sendSuccess(res, data as UserProfile);
 });
 
+// GET /api/v1/profiles/search?q=... — fuzzy search by handle or display name.
+// Limits to 20 results and always excludes the caller.
+profilesRouter.get('/api/v1/profiles/search', requireAuth, async (req: Request, res: Response) => {
+  const me = req.userId!;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (q.length < 2) {
+    sendSuccess(res, { results: [] });
+    return;
+  }
+
+  // Postgres ILIKE is fine at this scale; pg_trgm index on user_profiles
+  // would be a future optimization.
+  const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+  const { data, error } = await supabaseAdmin
+    .from('user_profiles')
+    .select('user_id, handle, display_name, avatar_url')
+    .or(`handle.ilike.${like},display_name.ilike.${like}`)
+    .neq('user_id', me)
+    .limit(20);
+  if (error) {
+    sendError(res, error.message, 500);
+    return;
+  }
+  sendSuccess(res, { results: data ?? [] });
+});
+
 // GET /api/v1/profiles/check-handle?h=foo — availability check (for onboarding / renaming)
 profilesRouter.get('/api/v1/profiles/check-handle', requireAuth, async (req: Request, res: Response) => {
   const h = typeof req.query.h === 'string' ? req.query.h.toLowerCase().trim() : '';
