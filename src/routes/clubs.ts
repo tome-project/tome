@@ -174,6 +174,76 @@ clubsRouter.get('/api/v1/clubs/:id', requireAuth, async (req: Request, res: Resp
   sendSuccess(res, { club, members });
 });
 
+// DELETE /api/v1/clubs/:id — host deletes the club (cascades to members + discussions)
+clubsRouter.delete('/api/v1/clubs/:id', requireAuth, async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const { data: club, error: fetchErr } = await supabaseAdmin
+    .from('clubs')
+    .select('host_id')
+    .eq('id', id)
+    .maybeSingle();
+  if (fetchErr) {
+    sendError(res, fetchErr.message, 500);
+    return;
+  }
+  if (!club) {
+    sendError(res, 'Club not found', 404);
+    return;
+  }
+  if (club.host_id !== req.userId) {
+    sendError(res, 'Only the host can delete this club', 403);
+    return;
+  }
+
+  const { error } = await supabaseAdmin.from('clubs').delete().eq('id', id);
+  if (error) {
+    sendError(res, error.message, 500);
+    return;
+  }
+  sendSuccess(res, { id });
+});
+
+// POST /api/v1/clubs/:id/leave — remove own membership. Hosts must delete
+// the club instead (otherwise they'd leave a club they own with discussions
+// that can't be posted in).
+clubsRouter.post('/api/v1/clubs/:id/leave', requireAuth, async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const me = req.userId!;
+
+  const { data: club, error: fetchErr } = await supabaseAdmin
+    .from('clubs')
+    .select('host_id')
+    .eq('id', id)
+    .maybeSingle();
+  if (fetchErr) {
+    sendError(res, fetchErr.message, 500);
+    return;
+  }
+  if (!club) {
+    sendError(res, 'Club not found', 404);
+    return;
+  }
+  if (club.host_id === me) {
+    sendError(res, "Hosts can't leave their own club — delete it instead", 400);
+    return;
+  }
+
+  const { error, count } = await supabaseAdmin
+    .from('club_members')
+    .delete({ count: 'exact' })
+    .eq('club_id', id)
+    .eq('user_id', me);
+  if (error) {
+    sendError(res, error.message, 500);
+    return;
+  }
+  if (!count) {
+    sendError(res, 'Not a member of this club', 404);
+    return;
+  }
+  sendSuccess(res, { id });
+});
+
 // POST /api/v1/clubs/:id/join — join a club
 clubsRouter.post('/api/v1/clubs/:id/join', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
