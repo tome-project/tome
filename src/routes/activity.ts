@@ -75,21 +75,29 @@ type ActivityEvent = {
   data: Record<string, unknown>;
 };
 
-// GET /api/v1/activity — friend-scoped activity feed
+// GET /api/v1/activity — activity feed
 //
-// Returns the caller's + their accepted friends' recent actions across:
+// Two modes driven by the optional `?user_id=<uuid>` query param:
+//
+//   • No param (default): the friend-scoped feed — caller + accepted
+//     friends. Honors each user's profile.activity_privacy; rows with
+//     per-item privacy of 'private' never surface.
+//   • With param: activity for a single target user. Visibility is a
+//     three-way function of the caller↔target relationship:
+//       - target is caller → all privacies (public + circle + private)
+//       - target is an accepted friend → public + circle
+//       - target is a stranger → public only
+//     Target's profile.activity_privacy is also respected: 'private'
+//     returns empty for anyone other than the caller; 'circle' requires
+//     caller to be a friend (or self).
+//
+// Unioned sources:
 //   - user_books (finished / started / want / dnf, rating + review carried
 //     along with finished events)
-//   - highlights (public + circle, carrying passage text + note)
+//   - highlights (carries passage text + note + chapter + color)
 //   - club_members (joined a club)
 //   - discussions (posted in a club)
 //
-// Visibility rules:
-//   - Users with activity_privacy='private' are excluded entirely (except
-//     the caller themselves).
-//   - Per-item privacy on user_books + highlights: only 'public' and
-//     'circle' are returned. Friend → caller is always in-circle, so
-//     circle items are visible. Self's 'private' items are omitted.
 // Response: { items: ActivityEvent[] } where ActivityEvent carries a
 // hydrated `profile` summary plus event-specific `data`.
 activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Response) => {
@@ -97,39 +105,91 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
   const LIMIT = 50;
   const PER_SOURCE = 30;
 
-  // 1. Accepted friendships → friend ids
-  const { data: friendships, error: fErr } = await supabaseAdmin
-    .from('friendships')
-    .select('user_a_id, user_b_id')
-    .eq('status', 'accepted')
-    .or(`user_a_id.eq.${me},user_b_id.eq.${me}`);
-  if (fErr) {
-    sendError(res, fErr.message, 500);
-    return;
-  }
-  const friendIds = (friendships ?? []).map((f) =>
-    (f.user_a_id as string) === me ? (f.user_b_id as string) : (f.user_a_id as string),
-  );
-  const circleIds = Array.from(new Set([me, ...friendIds]));
+  const targetParam = typeof req.query.user_id === 'string' ? req.query.user_id : null;
 
-  // 2. Load profiles and filter out anyone whose activity_privacy='private'
-  //    (the caller is always allowed, even if they've set themselves to
-  //    private — their own actions still show up in their own feed).
-  const { data: profileRows, error: pErr } = await supabaseAdmin
-    .from('user_profiles')
-    .select('user_id, handle, display_name, avatar_url, activity_privacy')
-    .in('user_id', circleIds);
-  if (pErr) {
-    sendError(res, pErr.message, 500);
-    return;
-  }
-  const profiles = (profileRows ?? []) as ProfileRow[];
+  let allowedIds: string[] = [];
   const profilesById = new Map<string, ProfileRow>();
-  const allowedIds: string[] = [];
-  for (const p of profiles) {
-    profilesById.set(p.user_id, p);
-    if (p.user_id === me || p.activity_privacy !== 'private') allowedIds.push(p.user_id);
+  let allowedPrivacies: Array<'public' | 'circle' | 'private'> = ['public', 'circle'];
+
+  if (targetParam) {
+    // Single-user mode
+    const { data: profileRow, error: profileErr } = await supabaseAdmin
+      .from('user_profiles')
+      .select('user_id, handle, display_name, avatar_url, activity_privacy')
+      .eq('user_id', targetParam)
+      .maybeSingle();
+    if (profileErr) {
+      sendError(res, profileErr.message, 500);
+      return;
+    }
+    if (!profileRow) {
+      sendError(res, 'User not found', 404);
+      return;
+    }
+    const target = profileRow as ProfileRow;
+    profilesById.set(target.user_id, target);
+
+    const isSelf = target.user_id === me;
+    let isFriend = false;
+    if (!isSelf) {
+      const [a, b] = [me, target.user_id].sort();
+      const { data: fships } = await supabaseAdmin
+        .from('friendships')
+        .select('id')
+        .eq('status', 'accepted')
+        .eq('user_a_id', a)
+        .eq('user_b_id', b)
+        .limit(1);
+      isFriend = (fships ?? []).length > 0;
+    }
+
+    // Honor the target's profile-level activity_privacy before fetching any rows.
+    if (!isSelf) {
+      if (target.activity_privacy === 'private') {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+      if (target.activity_privacy === 'circle' && !isFriend) {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+    }
+
+    allowedIds = [target.user_id];
+    if (isSelf) allowedPrivacies = ['public', 'circle', 'private'];
+    else if (isFriend) allowedPrivacies = ['public', 'circle'];
+    else allowedPrivacies = ['public'];
+  } else {
+    // Friend-scoped feed
+    const { data: friendships, error: fErr } = await supabaseAdmin
+      .from('friendships')
+      .select('user_a_id, user_b_id')
+      .eq('status', 'accepted')
+      .or(`user_a_id.eq.${me},user_b_id.eq.${me}`);
+    if (fErr) {
+      sendError(res, fErr.message, 500);
+      return;
+    }
+    const friendIds = (friendships ?? []).map((f) =>
+      (f.user_a_id as string) === me ? (f.user_b_id as string) : (f.user_a_id as string),
+    );
+    const circleIds = Array.from(new Set([me, ...friendIds]));
+
+    const { data: profileRows, error: pErr } = await supabaseAdmin
+      .from('user_profiles')
+      .select('user_id, handle, display_name, avatar_url, activity_privacy')
+      .in('user_id', circleIds);
+    if (pErr) {
+      sendError(res, pErr.message, 500);
+      return;
+    }
+    const profiles = (profileRows ?? []) as ProfileRow[];
+    for (const p of profiles) {
+      profilesById.set(p.user_id, p);
+      if (p.user_id === me || p.activity_privacy !== 'private') allowedIds.push(p.user_id);
+    }
   }
+
   if (allowedIds.length === 0) {
     sendSuccess(res, { items: [] });
     return;
@@ -143,14 +203,14 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
         'user_id, book_id, status, rating, review, favorite_quote, started_at, finished_at, updated_at, created_at, privacy',
       )
       .in('user_id', allowedIds)
-      .in('privacy', ['public', 'circle'])
+      .in('privacy', allowedPrivacies)
       .order('updated_at', { ascending: false })
       .limit(PER_SOURCE),
     supabaseAdmin
       .from('highlights')
       .select('user_id, book_id, text, note, chapter, color, privacy, created_at')
       .in('user_id', allowedIds)
-      .in('privacy', ['public', 'circle'])
+      .in('privacy', allowedPrivacies)
       .order('created_at', { ascending: false })
       .limit(PER_SOURCE),
     supabaseAdmin
