@@ -112,3 +112,33 @@ export interface Discussion {
   content: string;
   created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 0 schema additions
+// ---------------------------------------------------------------------------
+
+export type Privacy = 'public' | 'circle' | 'private';
+
+export interface UserProfile {
+  user_id: string;
+  handle: string;
+  display_name: string;
+  bio: string | null;
+  avatar_url: string | null;
+  handle_claimed: boolean;
+  library_privacy: Privacy;
+  activity_privacy: Privacy;
+  review_privacy: Privacy;
+  highlight_privacy: Privacy;
+  note_privacy: Privacy;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicProfile {
+  user_id: string;
+  handle: string;
+  display_name: string;
+  bio: string | null;
+  avatar_url: string | null;
+}
