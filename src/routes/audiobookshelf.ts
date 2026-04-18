@@ -126,12 +126,24 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
           continue;
         }
 
-        // Cover: download from ABS the first time we see a book with no local
-        // cover yet. Downstream UIs look for /api/v1/covers/:bookId.
-        if (item.media.coverPath && !catalogBook.cover_url) {
+        // Cover: make sure there's a local file AND the catalog row points at
+        // it. Re-sync is idempotent — if a previous sync wrote the file but
+        // not the DB (or wrote the DB but not the file), we reconcile here.
+        //   1. If the file is on disk already, just stamp cover_url.
+        //   2. Else if ABS has a coverPath, fetch + write both.
+        //   3. Else leave as-is (book has no cover upstream).
+        if (item.media.coverPath) {
           const dest = path.join(coversDir, `${catalogBook.id}.jpg`);
-          if (!fs.existsSync(dest)) {
-            try {
+          const targetUrl = `/api/v1/covers/${catalogBook.id}`;
+          try {
+            if (fs.existsSync(dest)) {
+              if (catalogBook.cover_url !== targetUrl) {
+                await supabaseAdmin
+                  .from('books')
+                  .update({ cover_url: targetUrl })
+                  .eq('id', catalogBook.id);
+              }
+            } else {
               const buf = await abs.getItemCover(item.id);
               if (buf) {
                 await sharp(buf)
@@ -140,12 +152,12 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
                   .toFile(dest);
                 await supabaseAdmin
                   .from('books')
-                  .update({ cover_url: `/api/v1/covers/${catalogBook.id}` })
+                  .update({ cover_url: targetUrl })
                   .eq('id', catalogBook.id);
               }
-            } catch {
-              // best-effort; covers can be re-fetched on next sync
             }
+          } catch {
+            // best-effort; covers can be re-fetched on next sync
           }
         }
 
