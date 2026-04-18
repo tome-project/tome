@@ -47,7 +47,25 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     return;
   }
 
-  // Bridge to user_books: on completion, auto-finish. Best-effort; ignore errors.
+  // Bridge to user_books.
+  //  - On first progress > 0, transition 'want' → 'reading' so the book
+  //    shows up in the dashboard's currently-reading carousel.
+  //  - On completion, auto-finish.
+  // Both are best-effort; ignore errors so a user_books miss never breaks
+  // the primary progress write.
+  if (pct > 0 && pct < 100) {
+    await supabaseAdmin
+      .from('user_books')
+      .update({
+        status: 'reading',
+        started_at: new Date().toISOString().slice(0, 10),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', me)
+      .eq('book_id', book_id)
+      .eq('status', 'want');
+  }
+
   if (pct >= 100) {
     const today = new Date().toISOString().slice(0, 10);
     await supabaseAdmin

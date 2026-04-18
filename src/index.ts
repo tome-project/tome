@@ -12,6 +12,11 @@ import { errorHandler } from './middleware';
 const app = express();
 const port = process.env.PORT || 3000;
 
+// We're behind Cloudflare Tunnel / nginx in production, which sets
+// X-Forwarded-For. Trust a single upstream hop so express-rate-limit can
+// identify clients by real IP without the tunnel warning.
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet());
 app.use(cors({

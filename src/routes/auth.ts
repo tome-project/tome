@@ -42,6 +42,31 @@ authRouter.post('/api/v1/auth/register', async (req: Request, res: Response) => 
   }, 201);
 });
 
+// POST /api/v1/auth/refresh — exchange a refresh token for a fresh session.
+// Called from the client on cold start when the stored access token is expired.
+authRouter.post('/api/v1/auth/refresh', async (req: Request, res: Response) => {
+  const { refresh_token } = req.body ?? {};
+  if (!refresh_token || typeof refresh_token !== 'string') {
+    sendError(res, 'refresh_token is required');
+    return;
+  }
+
+  const { data, error } = await supabase.auth.refreshSession({ refresh_token });
+  if (error || !data.session || !data.user) {
+    sendError(res, error?.message ?? 'Session expired', 401);
+    return;
+  }
+
+  sendSuccess(res, {
+    user: {
+      id: data.user.id,
+      email: data.user.email,
+      display_name: data.user.user_metadata?.display_name,
+    },
+    session: data.session,
+  });
+});
+
 // POST /api/v1/auth/login
 authRouter.post('/api/v1/auth/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;

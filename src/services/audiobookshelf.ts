@@ -65,6 +65,16 @@ export class AudiobookshelfService {
     );
     return data.results ?? [];
   }
+
+  /// Download a cover image for an ABS item as a raw Buffer. Returns null
+  /// on any non-200 response — callers should treat that as "no cover".
+  async getItemCover(itemId: string): Promise<Buffer | null> {
+    const response = await fetch(`${this.baseUrl}/api/items/${itemId}/cover`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  }
 }
 
 // Decide which media type a Tome source should be, given an ABS item.

@@ -1,3 +1,6 @@
+import path from 'path';
+import fs from 'fs';
+import sharp from 'sharp';
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { supabaseAdmin } from '../services/supabase';
@@ -10,6 +13,12 @@ import {
 } from '../services/audiobookshelf';
 import { decryptToken } from '../services/crypto';
 import { ensureMinimalCatalogBook } from '../services/catalog';
+
+const libraryPath = process.env.LIBRARY_PATH || './library';
+const coversDir = path.join(libraryPath, 'covers');
+if (!fs.existsSync(coversDir)) {
+  fs.mkdirSync(coversDir, { recursive: true });
+}
 
 export const audiobookshelfRouter = Router();
 
@@ -115,6 +124,29 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
         if (sourceErr) {
           errors.push(`Failed to attach source for "${title}": ${sourceErr.message}`);
           continue;
+        }
+
+        // Cover: download from ABS the first time we see a book with no local
+        // cover yet. Downstream UIs look for /api/v1/covers/:bookId.
+        if (item.media.coverPath && !catalogBook.cover_url) {
+          const dest = path.join(coversDir, `${catalogBook.id}.jpg`);
+          if (!fs.existsSync(dest)) {
+            try {
+              const buf = await abs.getItemCover(item.id);
+              if (buf) {
+                await sharp(buf)
+                  .resize({ width: 400, withoutEnlargement: true })
+                  .jpeg()
+                  .toFile(dest);
+                await supabaseAdmin
+                  .from('books')
+                  .update({ cover_url: `/api/v1/covers/${catalogBook.id}` })
+                  .eq('id', catalogBook.id);
+              }
+            } catch {
+              // best-effort; covers can be re-fetched on next sync
+            }
+          }
         }
 
         if (add_to_library !== false) {
