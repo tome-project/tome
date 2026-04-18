@@ -8,6 +8,8 @@ export interface ABSLibraryItem {
       title: string;
       subtitle?: string;
       authorName?: string;
+      // Present on the expanded /api/items/:id response; absent on the list endpoint.
+      authors?: Array<{ id?: string; name: string }>;
       narratorName?: string;
       seriesName?: string;
       genres?: string[];
@@ -64,6 +66,17 @@ export class AudiobookshelfService {
       `/api/libraries/${libraryId}/items?limit=${limit}&sort=media.metadata.title`
     );
     return data.results ?? [];
+  }
+
+  /// Fetch the expanded record for a single item. The list endpoint returns a
+  /// minified shape with `authorName` only — the item endpoint also returns
+  /// a structured `authors` array that's usable when authorName is empty.
+  async getItemDetail(itemId: string): Promise<ABSLibraryItem | null> {
+    try {
+      return await this.request<ABSLibraryItem>(`/api/items/${itemId}?expanded=1`);
+    } catch {
+      return null;
+    }
   }
 
   /// Download a cover image for an ABS item as a raw Buffer. Returns null

@@ -20,6 +20,52 @@ if (!fs.existsSync(coversDir)) {
   fs.mkdirSync(coversDir, { recursive: true });
 }
 
+// Pull a best-effort author list out of ABS metadata. The expanded item
+// endpoint gives us a structured `authors: [{name}]`; the list endpoint only
+// gives us `authorName` (sometimes a single name, sometimes slash-joined).
+function collectAuthors(meta: ABSLibraryItem['media']['metadata']): string[] {
+  if (meta.authors && meta.authors.length > 0) {
+    return meta.authors.map((a) => a.name).filter((n) => n && n.trim().length > 0);
+  }
+  if (meta.authorName && meta.authorName.trim().length > 0) {
+    // ABS sometimes stores narrator lists in authorName as "A/B/C". A plain
+    // single author never contains '/', so splitting is safe and drops the
+    // narrator-list noise onto the first entry — which is usually the real
+    // author for audiobook rips.
+    return meta.authorName
+      .split('/')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 1);
+  }
+  return [];
+}
+
+// Update a catalog row's authors when we have better data than what's stored.
+// Used when re-syncing an ABS item whose previous sync left authors empty.
+async function refreshCatalogBookAuthors(bookId: string, authors: string[]) {
+  const { data: book } = await supabaseAdmin
+    .from('books')
+    .select('*')
+    .eq('id', bookId)
+    .single();
+  if (!book) throw new Error(`Catalog book ${bookId} not found`);
+
+  const currentAuthors = (book.authors as string[] | null) ?? [];
+  if (currentAuthors.length > 0 || authors.length === 0) {
+    return book;
+  }
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('books')
+    .update({ authors })
+    .eq('id', bookId)
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to refresh authors for ${bookId}: ${error.message}`);
+  return updated;
+}
+
 export const audiobookshelfRouter = Router();
 
 // POST /api/v1/abs/sync — sync an ABS library into the catalog + book_sources,
@@ -91,19 +137,47 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
         const meta = item.media.metadata;
         const media_type = absMediaType(item);
         const title = meta.title || 'Unknown Title';
-        const primaryAuthor = meta.authorName ?? 'Unknown';
 
-        const catalogBook = await ensureMinimalCatalogBook({
-          title,
-          authors: meta.authorName ? [meta.authorName] : [],
-          subtitle: meta.subtitle ?? null,
-          description: meta.description ?? null,
-          publisher: meta.publisher ?? null,
-          published_year: absPublishedYear(meta.publishedYear),
-          genres: meta.genres ?? [],
-          language: meta.language ?? 'en',
-          isbn: meta.isbn ?? null,
-        });
+        // The list endpoint only gives us `authorName`. When that's missing —
+        // which happens for plenty of real ABS libraries — fetch the expanded
+        // item so we can pull from the structured `authors` array instead.
+        let authors = collectAuthors(meta);
+        if (authors.length === 0) {
+          const detail = await abs.getItemDetail(item.id);
+          if (detail) authors = collectAuthors(detail.media.metadata);
+        }
+
+        const primaryAuthor = authors[0] ?? 'Unknown';
+
+        // If we've synced this ABS item before, reuse the same catalog book
+        // row rather than letting ensureMinimalCatalogBook insert a duplicate.
+        // Duplicates happen when (title, author) dedup can't match — e.g. when
+        // ABS returns an empty authorName on one sync and a real one later.
+        let catalogBookId: string | null = null;
+        const { data: existingSource } = await supabaseAdmin
+          .from('book_sources')
+          .select('book_id')
+          .eq('owner_id', me)
+          .eq('kind', 'audiobookshelf')
+          .eq('external_id', item.id)
+          .maybeSingle();
+        if (existingSource) {
+          catalogBookId = existingSource.book_id as string;
+        }
+
+        const catalogBook = catalogBookId
+          ? await refreshCatalogBookAuthors(catalogBookId, authors)
+          : await ensureMinimalCatalogBook({
+              title,
+              authors,
+              subtitle: meta.subtitle ?? null,
+              description: meta.description ?? null,
+              publisher: meta.publisher ?? null,
+              published_year: absPublishedYear(meta.publishedYear),
+              genres: meta.genres ?? [],
+              language: meta.language ?? 'en',
+              isbn: meta.isbn ?? null,
+            });
 
         const { data: source, error: sourceErr } = await supabaseAdmin
           .from('book_sources')
