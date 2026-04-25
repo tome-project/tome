@@ -21,3 +21,4 @@ export { userBooksRouter } from './user-books';
 export { serversRouter } from './servers';
 export { serverSharesRouter } from './server-shares';
 export { libraryUploadRouter } from './library-upload';
+export { invitesRouter } from './invites';

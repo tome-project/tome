@@ -26,6 +26,7 @@ export interface UserProfile {
   bio: string | null;
   avatar_url: string | null;
   handle_claimed: boolean;
+  invite_code: string;
   library_privacy: Privacy;
   activity_privacy: Privacy;
   review_privacy: Privacy;

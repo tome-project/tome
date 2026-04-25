@@ -1,3 +1,10 @@
+export interface ABSChapter {
+  id: number;
+  start: number; // seconds
+  end: number; // seconds
+  title: string;
+}
+
 export interface ABSLibraryItem {
   id: string;
   ino: string;
@@ -23,6 +30,8 @@ export interface ABSLibraryItem {
     duration?: number;
     numChapters?: number;
     ebookFormat?: string;
+    // Only present on expanded item endpoint.
+    chapters?: ABSChapter[];
   };
   path: string;
   relPath: string;
