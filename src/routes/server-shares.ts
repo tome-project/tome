@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, selectMany, upsertOne, query } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const serverSharesRouter = Router();
@@ -12,62 +12,47 @@ interface PublicProfileRow {
   avatar_url: string | null;
 }
 
-// Ensure the caller owns the given server before we touch its shares.
-async function assertOwner(serverId: string, userId: string) {
-  const { data, error } = await supabaseAdmin
-    .from('media_servers')
-    .select('id')
-    .eq('id', serverId)
-    .eq('owner_id', userId)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  return !!data;
+async function assertOwner(serverId: string, userId: string): Promise<boolean> {
+  const row = await selectOne<{ id: string }>(
+    'SELECT id FROM media_servers WHERE id = $1 AND owner_id = $2',
+    [serverId, userId]
+  );
+  return !!row;
 }
 
-// GET /api/v1/servers/:id/shares — list grantees with their public profiles
 serverSharesRouter.get('/api/v1/servers/:id/shares', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const serverId = String(req.params.id);
-
-  if (!(await assertOwner(serverId, me))) {
-    sendError(res, 'Server not found', 404);
-    return;
-  }
-
-  const { data: shares, error } = await supabaseAdmin
-    .from('server_shares')
-    .select('id, grantee_id, created_at')
-    .eq('media_server_id', serverId);
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
-
-  const granteeIds = (shares ?? []).map((s) => s.grantee_id as string);
-  let profilesById = new Map<string, PublicProfileRow>();
-  if (granteeIds.length > 0) {
-    const { data: profiles, error: pErr } = await supabaseAdmin
-      .from('user_profiles')
-      .select('user_id, handle, display_name, avatar_url')
-      .in('user_id', granteeIds);
-    if (pErr) {
-      sendError(res, pErr.message, 500);
+  try {
+    if (!(await assertOwner(serverId, me))) {
+      sendError(res, 'Server not found', 404);
       return;
     }
-    profilesById = new Map((profiles as PublicProfileRow[] | null ?? []).map((p) => [p.user_id, p]));
+    const shares = await selectMany<{ id: string; grantee_id: string; created_at: string }>(
+      'SELECT id, grantee_id, created_at FROM server_shares WHERE media_server_id = $1',
+      [serverId]
+    );
+    let profilesById = new Map<string, PublicProfileRow>();
+    if (shares.length > 0) {
+      const profiles = await selectMany<PublicProfileRow>(
+        `SELECT user_id, handle, display_name, avatar_url
+           FROM user_profiles WHERE user_id = ANY($1)`,
+        [shares.map((s) => s.grantee_id)]
+      );
+      profilesById = new Map(profiles.map((p) => [p.user_id, p]));
+    }
+    sendSuccess(res, {
+      shares: shares.map((s) => ({
+        id: s.id,
+        created_at: s.created_at,
+        grantee: profilesById.get(s.grantee_id) ?? null,
+      })),
+    });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-
-  sendSuccess(res, {
-    shares: (shares ?? []).map((s) => ({
-      id: s.id,
-      created_at: s.created_at,
-      grantee: profilesById.get(s.grantee_id as string) ?? null,
-    })),
-  });
 });
 
-// POST /api/v1/servers/:id/shares — grant access to a friend
-// Body: { handle }
 serverSharesRouter.post('/api/v1/servers/:id/shares', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const serverId = String(req.params.id);
@@ -77,60 +62,43 @@ serverSharesRouter.post('/api/v1/servers/:id/shares', requireAuth, async (req: R
     return;
   }
   const handle = raw.toLowerCase().trim();
-
-  if (!(await assertOwner(serverId, me))) {
-    sendError(res, 'Server not found', 404);
-    return;
-  }
-
-  const { data: target, error: lookupErr } = await supabaseAdmin
-    .from('user_profiles')
-    .select('user_id')
-    .eq('handle', handle)
-    .maybeSingle();
-  if (lookupErr) {
-    sendError(res, lookupErr.message, 500);
-    return;
-  }
-  if (!target) {
-    sendError(res, 'No user with that handle', 404);
-    return;
-  }
-  if (target.user_id === me) {
-    sendError(res, "Can't share with yourself");
-    return;
-  }
-
-  // Require an accepted friendship before granting access — keeps the sharing
-  // surface inside the "circle" concept rather than spraying links at strangers.
-  const [a, b] = [me, target.user_id].sort();
-  const { data: friendship } = await supabaseAdmin
-    .from('friendships')
-    .select('status')
-    .eq('user_a_id', a)
-    .eq('user_b_id', b)
-    .maybeSingle();
-  if (!friendship || friendship.status !== 'accepted') {
-    sendError(res, 'You can only share with users in your circle', 403);
-    return;
-  }
-
-  const { data, error } = await supabaseAdmin
-    .from('server_shares')
-    .upsert(
+  try {
+    if (!(await assertOwner(serverId, me))) {
+      sendError(res, 'Server not found', 404);
+      return;
+    }
+    const target = await selectOne<{ user_id: string }>(
+      'SELECT user_id FROM user_profiles WHERE handle = $1',
+      [handle]
+    );
+    if (!target) {
+      sendError(res, 'No user with that handle', 404);
+      return;
+    }
+    if (target.user_id === me) {
+      sendError(res, "Can't share with yourself");
+      return;
+    }
+    const [a, b] = [me, target.user_id].sort();
+    const friendship = await selectOne<{ status: string }>(
+      'SELECT status FROM friendships WHERE user_a_id = $1 AND user_b_id = $2',
+      [a, b]
+    );
+    if (!friendship || friendship.status !== 'accepted') {
+      sendError(res, 'You can only share with users in your circle', 403);
+      return;
+    }
+    const data = await upsertOne(
+      'server_shares',
       { media_server_id: serverId, grantee_id: target.user_id },
-      { onConflict: 'media_server_id,grantee_id', ignoreDuplicates: false }
-    )
-    .select()
-    .single();
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+      { onConflict: 'media_server_id,grantee_id' }
+    );
+    sendSuccess(res, data, 201);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Insert failed', 500);
   }
-  sendSuccess(res, data, 201);
 });
 
-// DELETE /api/v1/servers/:id/shares/:shareId — revoke a grant
 serverSharesRouter.delete(
   '/api/v1/servers/:id/shares/:shareId',
   requireAuth,
@@ -138,25 +106,22 @@ serverSharesRouter.delete(
     const me = req.userId!;
     const serverId = String(req.params.id);
     const shareId = String(req.params.shareId);
-
-    if (!(await assertOwner(serverId, me))) {
-      sendError(res, 'Server not found', 404);
-      return;
+    try {
+      if (!(await assertOwner(serverId, me))) {
+        sendError(res, 'Server not found', 404);
+        return;
+      }
+      const result = await query(
+        'DELETE FROM server_shares WHERE id = $1 AND media_server_id = $2',
+        [shareId, serverId]
+      );
+      if (!result.rowCount) {
+        sendError(res, 'Share not found', 404);
+        return;
+      }
+      sendSuccess(res, { id: shareId });
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Delete failed', 500);
     }
-
-    const { error, count } = await supabaseAdmin
-      .from('server_shares')
-      .delete({ count: 'exact' })
-      .eq('id', shareId)
-      .eq('media_server_id', serverId);
-    if (error) {
-      sendError(res, error.message, 500);
-      return;
-    }
-    if (!count) {
-      sendError(res, 'Share not found', 404);
-      return;
-    }
-    sendSuccess(res, { id: shareId });
   }
 );

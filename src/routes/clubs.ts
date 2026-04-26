@@ -1,291 +1,222 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, selectMany, insertOne, deleteWhere } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const clubsRouter = Router();
 
-// GET /api/v1/clubs — list clubs the current user is a member of
+interface ClubRow {
+  id: string;
+  name: string;
+  book_id: string;
+  host_id: string;
+  invite_code: string;
+  start_date: string;
+  end_date: string | null;
+  created_at: string;
+}
+
+interface MemberRow {
+  id: string;
+  club_id: string;
+  user_id: string;
+  role: string;
+  joined_at: string;
+}
+
+interface PublicProfileRow {
+  user_id: string;
+  handle: string;
+  display_name: string;
+  avatar_url: string | null;
+}
+
+async function hydrateClubMembers(clubIds: string[]): Promise<Map<string, Array<{ user_id: string; joined_at: string }>>> {
+  const map = new Map<string, Array<{ user_id: string; joined_at: string }>>();
+  if (clubIds.length === 0) return map;
+  const members = await selectMany<{ club_id: string; user_id: string; joined_at: string }>(
+    'SELECT club_id, user_id, joined_at FROM club_members WHERE club_id = ANY($1)',
+    [clubIds]
+  );
+  for (const m of members) {
+    const existing = map.get(m.club_id) ?? [];
+    existing.push({ user_id: m.user_id, joined_at: m.joined_at });
+    map.set(m.club_id, existing);
+  }
+  return map;
+}
+
 clubsRouter.get('/api/v1/clubs', requireAuth, async (req: Request, res: Response) => {
-  // Get all club IDs the user is a member of
-  const { data: memberships, error: memberError } = await supabaseAdmin
-    .from('club_members')
-    .select('club_id')
-    .eq('user_id', req.userId!);
-
-  if (memberError) {
-    sendError(res, memberError.message, 500);
-    return;
+  const me = req.userId!;
+  try {
+    const memberships = await selectMany<{ club_id: string }>(
+      'SELECT club_id FROM club_members WHERE user_id = $1',
+      [me]
+    );
+    if (memberships.length === 0) {
+      sendSuccess(res, []);
+      return;
+    }
+    const clubIds = memberships.map((m) => m.club_id);
+    const clubs = await selectMany<ClubRow>(
+      'SELECT * FROM clubs WHERE id = ANY($1) ORDER BY created_at DESC',
+      [clubIds]
+    );
+    const membersByClub = await hydrateClubMembers(clubIds);
+    const data = clubs.map((c) => ({ ...c, club_members: membersByClub.get(c.id) ?? [] }));
+    sendSuccess(res, data);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-
-  if (!memberships || memberships.length === 0) {
-    sendSuccess(res, []);
-    return;
-  }
-
-  const clubIds = memberships.map((m) => m.club_id);
-
-  const { data, error } = await supabaseAdmin
-    .from('clubs')
-    .select(`
-      *,
-      club_members (
-        user_id,
-        joined_at
-      )
-    `)
-    .in('id', clubIds)
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
-
-  sendSuccess(res, data);
 });
 
-// POST /api/v1/clubs — create a club
 clubsRouter.post('/api/v1/clubs', requireAuth, async (req: Request, res: Response) => {
+  const me = req.userId!;
   const { name, book_id, start_date, end_date } = req.body;
-
   if (!name || !book_id) {
     sendError(res, 'name and book_id are required');
     return;
   }
-
   const inviteCode = crypto.randomBytes(6).toString('hex');
-
-  const { data: club, error: clubError } = await supabaseAdmin
-    .from('clubs')
-    .insert({
+  try {
+    const club = await insertOne<ClubRow>('clubs', {
       name,
       book_id,
-      host_id: req.userId,
+      host_id: me,
       invite_code: inviteCode,
       start_date: start_date || new Date().toISOString(),
       end_date: end_date || null,
-    })
-    .select()
-    .single();
-
-  if (clubError) {
-    sendError(res, clubError.message, 500);
-    return;
+    });
+    await insertOne('club_members', { club_id: club.id, user_id: me });
+    sendSuccess(res, club, 201);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Insert failed', 500);
   }
-
-  // Auto-add host as a member
-  await supabaseAdmin.from('club_members').insert({
-    club_id: club.id,
-    user_id: req.userId,
-  });
-
-  sendSuccess(res, club, 201);
 });
 
-// GET /api/v1/clubs/invite/:inviteCode — get club by invite code
 clubsRouter.get('/api/v1/clubs/invite/:inviteCode', async (req: Request, res: Response) => {
   const { inviteCode } = req.params;
-
-  const { data, error } = await supabaseAdmin
-    .from('clubs')
-    .select(`
-      *,
-      club_members (
-        user_id,
-        joined_at
-      )
-    `)
-    .eq('invite_code', inviteCode)
-    .single();
-
-  if (error) {
-    if (error.code === 'PGRST116') {
+  try {
+    const club = await selectOne<ClubRow>('SELECT * FROM clubs WHERE invite_code = $1', [inviteCode]);
+    if (!club) {
       sendError(res, 'Club not found', 404);
       return;
     }
-    sendError(res, error.message, 500);
-    return;
+    const membersByClub = await hydrateClubMembers([club.id]);
+    sendSuccess(res, { ...club, club_members: membersByClub.get(club.id) ?? [] });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-
-  sendSuccess(res, data);
 });
 
-// GET /api/v1/clubs/:id — hydrated club detail (club + members with public profiles)
 clubsRouter.get('/api/v1/clubs/:id', requireAuth, async (req: Request, res: Response) => {
   const id = String(req.params.id);
-
-  const { data: club, error: clubErr } = await supabaseAdmin
-    .from('clubs')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
-  if (clubErr) {
-    sendError(res, clubErr.message, 500);
-    return;
-  }
-  if (!club) {
-    sendError(res, 'Club not found', 404);
-    return;
-  }
-
-  // Only members can see club detail (including invite_code).
-  const { data: ownMembership } = await supabaseAdmin
-    .from('club_members')
-    .select('id')
-    .eq('club_id', id)
-    .eq('user_id', req.userId!)
-    .maybeSingle();
-  if (!ownMembership) {
-    sendError(res, 'Not a member of this club', 403);
-    return;
-  }
-
-  const { data: memberRows, error: membersErr } = await supabaseAdmin
-    .from('club_members')
-    .select('id, user_id, role, joined_at')
-    .eq('club_id', id);
-  if (membersErr) {
-    sendError(res, membersErr.message, 500);
-    return;
-  }
-
-  const userIds = (memberRows ?? []).map((m) => m.user_id as string);
-  const profilesById = new Map<string, Record<string, unknown>>();
-  if (userIds.length > 0) {
-    const { data: profiles } = await supabaseAdmin
-      .from('user_profiles')
-      .select('user_id, handle, display_name, avatar_url')
-      .in('user_id', userIds);
-    for (const p of profiles ?? []) {
-      profilesById.set(p.user_id as string, p as Record<string, unknown>);
+  const me = req.userId!;
+  try {
+    const club = await selectOne<ClubRow>('SELECT * FROM clubs WHERE id = $1', [id]);
+    if (!club) {
+      sendError(res, 'Club not found', 404);
+      return;
     }
+    const ownMembership = await selectOne(
+      'SELECT id FROM club_members WHERE club_id = $1 AND user_id = $2',
+      [id, me]
+    );
+    if (!ownMembership) {
+      sendError(res, 'Not a member of this club', 403);
+      return;
+    }
+    const memberRows = await selectMany<MemberRow>(
+      'SELECT id, user_id, role, joined_at FROM club_members WHERE club_id = $1',
+      [id]
+    );
+    const userIds = memberRows.map((m) => m.user_id);
+    const profilesById = new Map<string, PublicProfileRow>();
+    if (userIds.length > 0) {
+      const profiles = await selectMany<PublicProfileRow>(
+        'SELECT user_id, handle, display_name, avatar_url FROM user_profiles WHERE user_id = ANY($1)',
+        [userIds]
+      );
+      for (const p of profiles) profilesById.set(p.user_id, p);
+    }
+    const members = memberRows.map((m) => ({
+      id: m.id,
+      user_id: m.user_id,
+      role: m.role,
+      joined_at: m.joined_at,
+      profile: profilesById.get(m.user_id) ?? null,
+    }));
+    sendSuccess(res, { club, members });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-
-  const members = (memberRows ?? []).map((m) => ({
-    id: m.id,
-    user_id: m.user_id,
-    role: m.role,
-    joined_at: m.joined_at,
-    profile: profilesById.get(m.user_id as string) ?? null,
-  }));
-
-  sendSuccess(res, { club, members });
 });
 
-// DELETE /api/v1/clubs/:id — host deletes the club (cascades to members + discussions)
 clubsRouter.delete('/api/v1/clubs/:id', requireAuth, async (req: Request, res: Response) => {
   const id = String(req.params.id);
-  const { data: club, error: fetchErr } = await supabaseAdmin
-    .from('clubs')
-    .select('host_id')
-    .eq('id', id)
-    .maybeSingle();
-  if (fetchErr) {
-    sendError(res, fetchErr.message, 500);
-    return;
+  const me = req.userId!;
+  try {
+    const club = await selectOne<{ host_id: string }>('SELECT host_id FROM clubs WHERE id = $1', [id]);
+    if (!club) {
+      sendError(res, 'Club not found', 404);
+      return;
+    }
+    if (club.host_id !== me) {
+      sendError(res, 'Only the host can delete this club', 403);
+      return;
+    }
+    await deleteWhere('clubs', { id });
+    sendSuccess(res, { id });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Delete failed', 500);
   }
-  if (!club) {
-    sendError(res, 'Club not found', 404);
-    return;
-  }
-  if (club.host_id !== req.userId) {
-    sendError(res, 'Only the host can delete this club', 403);
-    return;
-  }
-
-  const { error } = await supabaseAdmin.from('clubs').delete().eq('id', id);
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
-  sendSuccess(res, { id });
 });
 
-// POST /api/v1/clubs/:id/leave — remove own membership. Hosts must delete
-// the club instead (otherwise they'd leave a club they own with discussions
-// that can't be posted in).
 clubsRouter.post('/api/v1/clubs/:id/leave', requireAuth, async (req: Request, res: Response) => {
   const id = String(req.params.id);
   const me = req.userId!;
-
-  const { data: club, error: fetchErr } = await supabaseAdmin
-    .from('clubs')
-    .select('host_id')
-    .eq('id', id)
-    .maybeSingle();
-  if (fetchErr) {
-    sendError(res, fetchErr.message, 500);
-    return;
+  try {
+    const club = await selectOne<{ host_id: string }>('SELECT host_id FROM clubs WHERE id = $1', [id]);
+    if (!club) {
+      sendError(res, 'Club not found', 404);
+      return;
+    }
+    if (club.host_id === me) {
+      sendError(res, "Hosts can't leave their own club — delete it instead", 400);
+      return;
+    }
+    const count = await deleteWhere('club_members', { club_id: id, user_id: me });
+    if (count === 0) {
+      sendError(res, 'Not a member of this club', 404);
+      return;
+    }
+    sendSuccess(res, { id });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Delete failed', 500);
   }
-  if (!club) {
-    sendError(res, 'Club not found', 404);
-    return;
-  }
-  if (club.host_id === me) {
-    sendError(res, "Hosts can't leave their own club — delete it instead", 400);
-    return;
-  }
-
-  const { error, count } = await supabaseAdmin
-    .from('club_members')
-    .delete({ count: 'exact' })
-    .eq('club_id', id)
-    .eq('user_id', me);
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
-  if (!count) {
-    sendError(res, 'Not a member of this club', 404);
-    return;
-  }
-  sendSuccess(res, { id });
 });
 
-// POST /api/v1/clubs/:id/join — join a club
 clubsRouter.post('/api/v1/clubs/:id/join', requireAuth, async (req: Request, res: Response) => {
   const { id } = req.params;
-
-  // Check club exists
-  const { data: club, error: clubError } = await supabaseAdmin
-    .from('clubs')
-    .select('id')
-    .eq('id', id)
-    .single();
-
-  if (clubError || !club) {
-    sendError(res, 'Club not found', 404);
-    return;
+  const me = req.userId!;
+  try {
+    const club = await selectOne<{ id: string }>('SELECT id FROM clubs WHERE id = $1', [id]);
+    if (!club) {
+      sendError(res, 'Club not found', 404);
+      return;
+    }
+    const existing = await selectOne(
+      'SELECT id FROM club_members WHERE club_id = $1 AND user_id = $2',
+      [id, me]
+    );
+    if (existing) {
+      sendError(res, 'Already a member of this club');
+      return;
+    }
+    const data = await insertOne('club_members', { club_id: id, user_id: me });
+    sendSuccess(res, data, 201);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Insert failed', 500);
   }
-
-  // Check if already a member
-  const { data: existing } = await supabaseAdmin
-    .from('club_members')
-    .select('id')
-    .eq('club_id', id)
-    .eq('user_id', req.userId!)
-    .single();
-
-  if (existing) {
-    sendError(res, 'Already a member of this club');
-    return;
-  }
-
-  const { data, error } = await supabaseAdmin
-    .from('club_members')
-    .insert({
-      club_id: id,
-      user_id: req.userId,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
-
-  sendSuccess(res, data, 201);
 });

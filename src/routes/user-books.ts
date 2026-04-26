@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, selectMany, upsertOne, deleteWhere, query } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const userBooksRouter = Router();
@@ -18,18 +18,11 @@ function isPrivacy(v: unknown): v is Privacy {
   return typeof v === 'string' && (PRIVACIES as string[]).includes(v);
 }
 
-// The hydrated row shape the client consumes — user_book joined with the catalog book.
-const SELECT_WITH_BOOK = '*, book:books(*)';
+// Hydrated row: user_book + the catalog book as a `book` JSON column.
+const HYDRATED_SELECT = `
+  ub.*,
+  to_jsonb(b.*) AS book`;
 
-// GET /api/v1/user-books?status=reading&user_id=...
-// List a user's library. Defaults to the caller's own; pass user_id to view
-// another user's shelf with privacy-respecting visibility:
-//   own             → everything
-//   in circle       → public + circle
-//   not in circle   → public only
-// Runs via supabaseAdmin (bypasses RLS), so the visibility check is
-// duplicated here in app code — keep in sync with the RLS policies on
-// user_books if those change.
 userBooksRouter.get('/api/v1/user-books', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const targetUserId = typeof req.query.user_id === 'string' ? req.query.user_id : me;
@@ -39,60 +32,62 @@ userBooksRouter.get('/api/v1/user-books', requireAuth, async (req: Request, res:
     return;
   }
 
-  let query = supabaseAdmin
-    .from('user_books')
-    .select(SELECT_WITH_BOOK)
-    .eq('user_id', targetUserId)
-    .order('updated_at', { ascending: false });
-
-  if (status) query = query.eq('status', status);
-
+  // Visibility filter when querying another user's shelf
+  let privacyFilter = '';
   if (targetUserId !== me) {
     const [a, b] = [me, targetUserId].sort();
-    const { data: friendship } = await supabaseAdmin
-      .from('friendships')
-      .select('status')
-      .eq('user_a_id', a)
-      .eq('user_b_id', b)
-      .maybeSingle();
-    const inCircle = friendship?.status === 'accepted';
-    query = inCircle
-      ? query.in('privacy', ['public', 'circle'])
-      : query.eq('privacy', 'public');
+    const friendship = await selectOne<{ status: string }>(
+      'SELECT status FROM friendships WHERE user_a_id = $1 AND user_b_id = $2',
+      [a, b]
+    );
+    privacyFilter = friendship?.status === 'accepted'
+      ? "AND ub.privacy IN ('public', 'circle')"
+      : "AND ub.privacy = 'public'";
   }
 
-  const { data, error } = await query;
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  const params: unknown[] = [targetUserId];
+  let statusClause = '';
+  if (status) {
+    params.push(status);
+    statusClause = `AND ub.status = $${params.length}`;
   }
-  sendSuccess(res, { items: data ?? [] });
+
+  try {
+    const data = await selectMany(
+      `SELECT ${HYDRATED_SELECT}
+         FROM user_books ub
+         LEFT JOIN books b ON b.id = ub.book_id
+        WHERE ub.user_id = $1 ${statusClause} ${privacyFilter}
+        ORDER BY ub.updated_at DESC`,
+      params
+    );
+    sendSuccess(res, { items: data });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+  }
 });
 
-// GET /api/v1/user-books/:id
 userBooksRouter.get('/api/v1/user-books/:id', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const id = String(req.params.id);
-
-  const { data, error } = await supabaseAdmin
-    .from('user_books')
-    .select(SELECT_WITH_BOOK)
-    .eq('id', id)
-    .eq('user_id', me)
-    .maybeSingle();
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  try {
+    const data = await selectOne(
+      `SELECT ${HYDRATED_SELECT}
+         FROM user_books ub
+         LEFT JOIN books b ON b.id = ub.book_id
+        WHERE ub.id = $1 AND ub.user_id = $2`,
+      [id, me]
+    );
+    if (!data) {
+      sendError(res, 'Not found', 404);
+      return;
+    }
+    sendSuccess(res, data);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-  if (!data) {
-    sendError(res, 'Not found', 404);
-    return;
-  }
-  sendSuccess(res, data);
 });
 
-// POST /api/v1/user-books — add a book to my library
-// Body: { book_id, status, rating?, review?, privacy?, started_at?, finished_at? }
 userBooksRouter.post('/api/v1/user-books', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const body = req.body ?? {};
@@ -139,128 +134,130 @@ userBooksRouter.post('/api/v1/user-books', requireAuth, async (req: Request, res
     insert.review_privacy = body.review_privacy;
   }
 
-  // Catalog existence check for a friendlier error than RLS
-  const { data: catalogBook, error: catalogErr } = await supabaseAdmin
-    .from('books')
-    .select('id')
-    .eq('id', body.book_id)
-    .maybeSingle();
-  if (catalogErr) {
-    sendError(res, catalogErr.message, 500);
-    return;
-  }
-  if (!catalogBook) {
-    sendError(res, 'book_id not in catalog — import it first via /api/v1/catalog/import', 404);
-    return;
-  }
+  try {
+    const catalog = await selectOne<{ id: string }>(
+      'SELECT id FROM books WHERE id = $1',
+      [body.book_id]
+    );
+    if (!catalog) {
+      sendError(res, 'book_id not in catalog — import it first via /api/v1/catalog/import', 404);
+      return;
+    }
 
-  const { data, error } = await supabaseAdmin
-    .from('user_books')
-    .upsert(insert, { onConflict: 'user_id,book_id' })
-    .select(SELECT_WITH_BOOK)
-    .single();
+    await upsertOne('user_books', insert, { onConflict: 'user_id,book_id' });
 
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+    const data = await selectOne(
+      `SELECT ${HYDRATED_SELECT}
+         FROM user_books ub
+         LEFT JOIN books b ON b.id = ub.book_id
+        WHERE ub.user_id = $1 AND ub.book_id = $2`,
+      [me, body.book_id]
+    );
+    sendSuccess(res, data, 201);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Insert failed', 500);
   }
-  sendSuccess(res, data, 201);
 });
 
-// PATCH /api/v1/user-books/:id
 userBooksRouter.patch('/api/v1/user-books/:id', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const id = String(req.params.id);
   const body = req.body ?? {};
 
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  const fields: string[] = ['updated_at = now()'];
+  const params: unknown[] = [];
 
+  const todayDate = new Date().toISOString().slice(0, 10);
   if (body.status !== undefined) {
     if (!isStatus(body.status)) {
       sendError(res, `status must be one of: ${STATUSES.join(', ')}`);
       return;
     }
-    updates.status = body.status;
+    fields.push(`status = $${params.length + 1}`); params.push(body.status);
     if (body.status === 'finished' && body.finished_at === undefined) {
-      updates.finished_at = new Date().toISOString().slice(0, 10);
+      fields.push(`finished_at = $${params.length + 1}`); params.push(todayDate);
     }
     if (body.status === 'reading' && body.started_at === undefined) {
-      updates.started_at = new Date().toISOString().slice(0, 10);
+      fields.push(`started_at = $${params.length + 1}`); params.push(todayDate);
     }
   }
   if (body.rating !== undefined) {
     if (body.rating === null) {
-      updates.rating = null;
+      fields.push(`rating = NULL`);
     } else {
       const r = Number(body.rating);
       if (!Number.isInteger(r) || r < 1 || r > 5) {
         sendError(res, 'rating must be an integer 1–5 or null');
         return;
       }
-      updates.rating = r;
+      fields.push(`rating = $${params.length + 1}`); params.push(r);
     }
   }
-  if (body.review !== undefined) updates.review = body.review === null ? null : String(body.review);
-  if (body.favorite_quote !== undefined) updates.favorite_quote = body.favorite_quote === null ? null : String(body.favorite_quote);
-  if (body.started_at !== undefined) updates.started_at = body.started_at;
-  if (body.finished_at !== undefined) updates.finished_at = body.finished_at;
+  if (body.review !== undefined) {
+    fields.push(`review = $${params.length + 1}`);
+    params.push(body.review === null ? null : String(body.review));
+  }
+  if (body.favorite_quote !== undefined) {
+    fields.push(`favorite_quote = $${params.length + 1}`);
+    params.push(body.favorite_quote === null ? null : String(body.favorite_quote));
+  }
+  if (body.started_at !== undefined) { fields.push(`started_at = $${params.length + 1}`); params.push(body.started_at); }
+  if (body.finished_at !== undefined) { fields.push(`finished_at = $${params.length + 1}`); params.push(body.finished_at); }
   if (body.privacy !== undefined) {
     if (!isPrivacy(body.privacy)) {
       sendError(res, `privacy must be one of: ${PRIVACIES.join(', ')}`);
       return;
     }
-    updates.privacy = body.privacy;
+    fields.push(`privacy = $${params.length + 1}`); params.push(body.privacy);
   }
   if (body.review_privacy !== undefined) {
     if (body.review_privacy !== null && !isPrivacy(body.review_privacy)) {
       sendError(res, `review_privacy must be one of: ${PRIVACIES.join(', ')}`);
       return;
     }
-    updates.review_privacy = body.review_privacy;
+    fields.push(`review_privacy = $${params.length + 1}`); params.push(body.review_privacy);
   }
 
-  if (Object.keys(updates).length === 1) {
+  if (fields.length === 1) {
     sendError(res, 'No fields to update');
     return;
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('user_books')
-    .update(updates)
-    .eq('id', id)
-    .eq('user_id', me)
-    .select(SELECT_WITH_BOOK)
-    .maybeSingle();
-
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  params.push(id, me);
+  try {
+    await query(
+      `UPDATE user_books SET ${fields.join(', ')}
+        WHERE id = $${params.length - 1} AND user_id = $${params.length}`,
+      params
+    );
+    const data = await selectOne(
+      `SELECT ${HYDRATED_SELECT}
+         FROM user_books ub
+         LEFT JOIN books b ON b.id = ub.book_id
+        WHERE ub.id = $1 AND ub.user_id = $2`,
+      [id, me]
+    );
+    if (!data) {
+      sendError(res, 'Not found', 404);
+      return;
+    }
+    sendSuccess(res, data);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Update failed', 500);
   }
-  if (!data) {
-    sendError(res, 'Not found', 404);
-    return;
-  }
-  sendSuccess(res, data);
 });
 
-// DELETE /api/v1/user-books/:id
 userBooksRouter.delete('/api/v1/user-books/:id', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const id = String(req.params.id);
-
-  const { error, count } = await supabaseAdmin
-    .from('user_books')
-    .delete({ count: 'exact' })
-    .eq('id', id)
-    .eq('user_id', me);
-
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  try {
+    const count = await deleteWhere('user_books', { id, user_id: me });
+    if (count === 0) {
+      sendError(res, 'Not found', 404);
+      return;
+    }
+    sendSuccess(res, { id });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Delete failed', 500);
   }
-  if (!count) {
-    sendError(res, 'Not found', 404);
-    return;
-  }
-  sendSuccess(res, { id });
 });

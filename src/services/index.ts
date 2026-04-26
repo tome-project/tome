@@ -1,4 +1,13 @@
-export { supabase, supabaseAdmin } from './supabase';
+export {
+  query,
+  selectOne,
+  selectMany,
+  insertOne,
+  updateOne,
+  upsertOne,
+  upsertMany,
+  deleteWhere,
+} from './db';
 export { extractEpubMetadata } from './epub-metadata';
 export type { EpubMetadata } from './epub-metadata';
 export { AudiobookshelfService, absMediaType, absPublishedYear } from './audiobookshelf';

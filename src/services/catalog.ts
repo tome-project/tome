@@ -1,4 +1,4 @@
-import { supabaseAdmin } from './supabase';
+import { selectOne, insertOne, upsertOne } from './db';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -219,12 +219,11 @@ export async function importBook(input: ImportInput): Promise<CatalogBook> {
 
   // Dedup: already in catalog by OL id?
   {
-    const { data: existing } = await supabaseAdmin
-      .from('books')
-      .select('*')
-      .eq('open_library_id', olId)
-      .maybeSingle();
-    if (existing) return existing as CatalogBook;
+    const existing = await selectOne<CatalogBook>(
+      'SELECT * FROM books WHERE open_library_id = $1',
+      [olId]
+    );
+    if (existing) return existing;
   }
 
   const work = await fetchOLWork(olId);
@@ -298,14 +297,11 @@ export async function importBook(input: ImportInput): Promise<CatalogBook> {
     language: firstLanguage(edition) ?? gbInfo?.language ?? 'en',
   };
 
-  const { data, error } = await supabaseAdmin
-    .from('books')
-    .upsert(record, { onConflict: 'open_library_id' })
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to insert catalog book: ${error.message}`);
-  return data as CatalogBook;
+  const inserted = await upsertOne<CatalogBook>('books', record, {
+    onConflict: 'open_library_id',
+  });
+  if (!inserted) throw new Error('Failed to insert catalog book');
+  return inserted;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,13 +309,7 @@ export async function importBook(input: ImportInput): Promise<CatalogBook> {
 // ---------------------------------------------------------------------------
 
 export async function getCatalogBook(id: string): Promise<CatalogBook | null> {
-  const { data, error } = await supabaseAdmin
-    .from('books')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  return (data as CatalogBook | null) ?? null;
+  return selectOne<CatalogBook>('SELECT * FROM books WHERE id = $1', [id]);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,13 +353,11 @@ export async function ensureMinimalCatalogBook(input: MinimalBookInput): Promise
   const primaryAuthor = authors[0] ?? null;
 
   if (primaryAuthor) {
-    const { data: existing } = await supabaseAdmin
-      .from('books')
-      .select('*')
-      .eq('title', input.title)
-      .contains('authors', [primaryAuthor])
-      .maybeSingle();
-    if (existing) return existing as CatalogBook;
+    const existing = await selectOne<CatalogBook>(
+      'SELECT * FROM books WHERE title = $1 AND authors @> $2::text[]',
+      [input.title, [primaryAuthor]]
+    );
+    if (existing) return existing;
   }
 
   const normalizedIsbn = input.isbn?.replace(/[-\s]/g, '');
@@ -390,11 +378,5 @@ export async function ensureMinimalCatalogBook(input: MinimalBookInput): Promise
     language: input.language ?? 'en',
   };
 
-  const { data, error } = await supabaseAdmin
-    .from('books')
-    .insert(record)
-    .select()
-    .single();
-  if (error) throw new Error(`Failed to insert minimal catalog book: ${error.message}`);
-  return data as CatalogBook;
+  return insertOne<CatalogBook>('books', record);
 }

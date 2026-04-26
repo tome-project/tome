@@ -1,19 +1,17 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, upsertOne, query } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const progressRouter = Router();
 
-// POST /api/v1/progress — save position/percentage for a book the user is reading.
+// POST /api/v1/progress — save position/percentage for a book.
 // Body: { book_id, position, percentage, source_kind? }
 //
-// Status / rating / review now live on /api/v1/user-books. This route is
-// strictly for streaming position updates from the reader.
-//
-// When percentage hits 100, auto-mark the corresponding user_book as 'finished'
-// (if one exists). We don't auto-create the user_book — adding a book to the
-// library is a deliberate action and goes through POST /api/v1/user-books.
+// Status / rating / review live on /api/v1/user-books. This route is just
+// streaming position updates from the reader. When percentage hits 100,
+// auto-mark the corresponding user_book as 'finished' if one exists; on
+// first progress > 0, transition 'want' → 'reading'. Both are best-effort.
 progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const { book_id, position, percentage, source_kind } = req.body ?? {};
@@ -28,77 +26,59 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     return;
   }
 
-  const upsertData: Record<string, unknown> = {
+  const upsertRecord: Record<string, unknown> = {
     user_id: me,
     book_id,
     position: String(position),
     percentage: pct,
     updated_at: new Date().toISOString(),
   };
-  if (source_kind !== undefined) upsertData.source_kind = source_kind === null ? null : String(source_kind);
-
-  const { data, error } = await supabaseAdmin
-    .from('reading_progress')
-    .upsert(upsertData, { onConflict: 'user_id,book_id' })
-    .select()
-    .single();
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  if (source_kind !== undefined) {
+    upsertRecord.source_kind = source_kind === null ? null : String(source_kind);
   }
 
-  // Bridge to user_books.
-  //  - On first progress > 0, transition 'want' → 'reading' so the book
-  //    shows up in the dashboard's currently-reading carousel.
-  //  - On completion, auto-finish.
-  // Both are best-effort; ignore errors so a user_books miss never breaks
-  // the primary progress write.
-  if (pct > 0 && pct < 100) {
-    await supabaseAdmin
-      .from('user_books')
-      .update({
-        status: 'reading',
-        started_at: new Date().toISOString().slice(0, 10),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('user_id', me)
-      .eq('book_id', book_id)
-      .eq('status', 'want');
-  }
+  try {
+    const data = await upsertOne('reading_progress', upsertRecord, {
+      onConflict: 'user_id,book_id',
+    });
 
-  if (pct >= 100) {
+    // Bridge to user_books — ignore errors so a miss never breaks the
+    // primary progress write.
     const today = new Date().toISOString().slice(0, 10);
-    await supabaseAdmin
-      .from('user_books')
-      .update({
-        status: 'finished',
-        finished_at: today,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('user_id', me)
-      .eq('book_id', book_id)
-      .neq('status', 'finished');
-  }
+    if (pct > 0 && pct < 100) {
+      await query(
+        `UPDATE user_books
+            SET status = 'reading', started_at = $1, updated_at = now()
+          WHERE user_id = $2 AND book_id = $3 AND status = 'want'`,
+        [today, me, book_id]
+      );
+    }
+    if (pct >= 100) {
+      await query(
+        `UPDATE user_books
+            SET status = 'finished', finished_at = $1, updated_at = now()
+          WHERE user_id = $2 AND book_id = $3 AND status <> 'finished'`,
+        [today, me, book_id]
+      );
+    }
 
-  sendSuccess(res, data);
+    sendSuccess(res, data);
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+  }
 });
 
-// GET /api/v1/progress/:bookId — current reading position for a book
+// GET /api/v1/progress/:bookId — current reading position
 progressRouter.get('/api/v1/progress/:bookId', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const bookId = String(req.params.bookId);
-
-  const { data, error } = await supabaseAdmin
-    .from('reading_progress')
-    .select('*')
-    .eq('user_id', me)
-    .eq('book_id', bookId)
-    .maybeSingle();
-
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
+  try {
+    const data = await selectOne(
+      'SELECT * FROM reading_progress WHERE user_id = $1 AND book_id = $2',
+      [me, bookId]
+    );
+    sendSuccess(res, data ?? { book_id: bookId, position: '0', percentage: 0 });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
-
-  sendSuccess(res, data ?? { book_id: bookId, position: '0', percentage: 0 });
 });

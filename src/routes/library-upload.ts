@@ -5,7 +5,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import sharp from 'sharp';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, upsertOne, query } from '../services/db';
 import { extractEpubMetadata, ensureMinimalCatalogBook } from '../services';
 import { sendSuccess, sendError } from '../utils';
 
@@ -159,11 +159,8 @@ libraryUploadRouter.post('/api/v1/library/upload', requireAuth, runUpload, async
         const coverPath = path.join(coversDir, `${catalogBook.id}.jpg`);
         await sharp(coverBuffer).resize({ width: 400, withoutEnlargement: true }).jpeg().toFile(coverPath);
         const coverUrl = `/api/v1/covers/${catalogBook.id}`;
-        const { error: coverErr } = await supabaseAdmin
-          .from('books')
-          .update({ cover_url: coverUrl })
-          .eq('id', catalogBook.id);
-        if (!coverErr) catalogBook.cover_url = coverUrl;
+        await query('UPDATE books SET cover_url = $1 WHERE id = $2', [coverUrl, catalogBook.id]);
+        catalogBook.cover_url = coverUrl;
       } catch {
         // cover save is best-effort
       }
@@ -171,21 +168,20 @@ libraryUploadRouter.post('/api/v1/library/upload', requireAuth, runUpload, async
 
     // If this user already has an upload source for this book, delete the
     // previous on-disk file so we don't leak storage.
-    const { data: existing } = await supabaseAdmin
-      .from('book_sources')
-      .select('file_path')
-      .eq('book_id', catalogBook.id)
-      .eq('owner_id', me)
-      .eq('kind', 'upload')
-      .maybeSingle();
+    const existing = await selectOne<{ file_path: string | null }>(
+      `SELECT file_path FROM book_sources
+        WHERE book_id = $1 AND owner_id = $2 AND kind = 'upload'`,
+      [catalogBook.id, me]
+    );
     if (existing?.file_path && existing.file_path !== relativePath) {
-      const oldPath = path.join(libraryPath, existing.file_path as string);
+      const oldPath = path.join(libraryPath, existing.file_path);
       await fs.promises.unlink(oldPath).catch(() => {});
     }
 
-    const { data: source, error: sourceErr } = await supabaseAdmin
-      .from('book_sources')
-      .upsert(
+    let source: Record<string, unknown> | null = null;
+    try {
+      source = await upsertOne(
+        'book_sources',
         {
           book_id: catalogBook.id,
           owner_id: me,
@@ -194,12 +190,10 @@ libraryUploadRouter.post('/api/v1/library/upload', requireAuth, runUpload, async
           file_path: relativePath,
         },
         { onConflict: 'book_id,owner_id,kind' },
-      )
-      .select()
-      .single();
-    if (sourceErr) {
+      );
+    } catch (sourceErr) {
       await fs.promises.unlink(file.path).catch(() => {});
-      sendError(res, sourceErr.message, 500);
+      sendError(res, sourceErr instanceof Error ? sourceErr.message : 'Source upsert failed', 500);
       return;
     }
 
@@ -208,15 +202,15 @@ libraryUploadRouter.post('/api/v1/library/upload', requireAuth, runUpload, async
 
     let userBook: Record<string, unknown> | null = null;
     if (addToLibrary) {
-      const { data: ub, error: ubErr } = await supabaseAdmin
-        .from('user_books')
-        .upsert(
+      try {
+        userBook = await upsertOne(
+          'user_books',
           { user_id: me, book_id: catalogBook.id, status },
           { onConflict: 'user_id,book_id' },
-        )
-        .select()
-        .maybeSingle();
-      if (!ubErr && ub) userBook = ub as Record<string, unknown>;
+        );
+      } catch {
+        // best-effort; main upload still succeeded
+      }
     }
 
     sendSuccess(res, { book: catalogBook, source, user_book: userBook }, 201);

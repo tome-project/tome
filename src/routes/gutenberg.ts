@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { upsertOne } from '../services/db';
 import { ensureMinimalCatalogBook } from '../services/catalog';
 import { sendSuccess, sendError } from '../utils';
 
@@ -134,44 +134,34 @@ gutenbergRouter.post('/api/v1/gutenberg/download', requireAuth, async (req: Requ
     });
 
     // Attach the downloaded file as a source owned by this user.
-    const { data: source, error: sourceErr } = await supabaseAdmin
-      .from('book_sources')
-      .upsert(
-        {
-          book_id: catalogBook.id,
-          owner_id: me,
-          kind: 'gutenberg',
-          media_type: 'epub',
-          file_path: relativePath,
-          external_id: String(gutenberg_id),
-          external_url: epub_url,
-        },
-        { onConflict: 'book_id,owner_id,kind' }
-      )
-      .select()
-      .single();
-    if (sourceErr) {
-      sendError(res, sourceErr.message, 500);
-      return;
-    }
+    const source = await upsertOne(
+      'book_sources',
+      {
+        book_id: catalogBook.id,
+        owner_id: me,
+        kind: 'gutenberg',
+        media_type: 'epub',
+        file_path: relativePath,
+        external_id: String(gutenberg_id),
+        external_url: epub_url,
+      },
+      { onConflict: 'book_id,owner_id,kind' }
+    );
 
     // Optionally add to the user's library with status='want'.
-    let userBook = null;
+    let userBook: unknown = null;
     if (add_to_library !== false) {
-      const { data: ub, error: ubErr } = await supabaseAdmin
-        .from('user_books')
-        .upsert(
+      try {
+        userBook = await upsertOne(
+          'user_books',
           { user_id: me, book_id: catalogBook.id, status: 'want' },
           { onConflict: 'user_id,book_id', ignoreDuplicates: true }
-        )
-        .select()
-        .maybeSingle();
-      if (ubErr) {
+        );
+      } catch (err) {
         // Not fatal — the download still succeeded.
+        const message = err instanceof Error ? err.message : 'Unknown error';
         // eslint-disable-next-line no-console
-        console.warn(`Failed to add Gutenberg book to user library: ${ubErr.message}`);
-      } else {
-        userBook = ub;
+        console.warn(`Failed to add Gutenberg book to user library: ${message}`);
       }
     }
 

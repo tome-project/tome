@@ -9,6 +9,10 @@ RUN npm run build
 
 FROM node:22-alpine
 
+# ffmpeg provides ffprobe + ffmpeg, used by the filesystem scanner to read
+# audiobook metadata (title/author/chapters/duration) and extract cover art.
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev

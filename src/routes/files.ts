@@ -2,13 +2,24 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, selectMany } from '../services/db';
 import { decryptToken } from '../services/crypto';
 import { sendError } from '../utils';
 
 export const filesRouter = Router();
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
+// Filesystem-source files live under SCAN_PATH (separate from LIBRARY_PATH
+// which holds covers/uploads/gutenberg). Defaults to LIBRARY_PATH for local
+// dev where the two are the same directory.
+const scanPath = process.env.SCAN_PATH || libraryPath;
+
+interface SourceTrack {
+  index: number;
+  title: string;
+  file_path: string;
+  duration: number | null;
+}
 
 interface SourceRow {
   id: string;
@@ -19,6 +30,7 @@ interface SourceRow {
   external_id: string | null;
   external_url: string | null;
   media_server_id: string | null;
+  tracks: SourceTrack[] | null;
   created_at: string;
 }
 
@@ -28,12 +40,11 @@ interface SourceRow {
 //   - rows on a media_server that has shared with the caller.
 // We additionally prefer: own-first, then any accessible row.
 async function pickSource(bookId: string, userId: string): Promise<SourceRow | null> {
-  const { data, error } = await supabaseAdmin
-    .from('book_sources')
-    .select('*')
-    .eq('book_id', bookId);
-  if (error || !data || data.length === 0) return null;
-  const rows = data as SourceRow[];
+  const rows = await selectMany<SourceRow>(
+    'SELECT * FROM book_sources WHERE book_id = $1',
+    [bookId]
+  );
+  if (rows.length === 0) return null;
   const own = rows.find((s) => s.owner_id === userId);
   return own ?? rows[0];
 }
@@ -48,15 +59,10 @@ async function streamAbsFile(
     return;
   }
 
-  const { data: server, error } = await supabaseAdmin
-    .from('media_servers')
-    .select('url, token_encrypted')
-    .eq('id', source.media_server_id)
-    .maybeSingle();
-  if (error) {
-    sendError(res, error.message, 500);
-    return;
-  }
+  const server = await selectOne<{ url: string; token_encrypted: string }>(
+    'SELECT url, token_encrypted FROM media_servers WHERE id = $1',
+    [source.media_server_id]
+  );
   if (!server) {
     sendError(res, 'Originating server no longer exists', 404);
     return;
@@ -140,14 +146,35 @@ async function streamAbsFile(
   }
 }
 
-function streamLocalFile(source: SourceRow, bookTitle: string, res: Response, rangeHeader: string | undefined) {
+function streamLocalFile(
+  source: SourceRow,
+  bookTitle: string,
+  res: Response,
+  rangeHeader: string | undefined,
+  trackParam: string | undefined
+) {
   if (!source.file_path) {
     sendError(res, 'Local source has no file_path', 500);
     return;
   }
-  const filePath = path.resolve(libraryPath, source.file_path);
-  const resolvedLibrary = path.resolve(libraryPath);
-  if (!filePath.startsWith(resolvedLibrary)) {
+
+  // Multi-track audiobooks: source.file_path is the directory, source.tracks
+  // names the per-chapter files. Pick the requested track (default 0).
+  let resolvedSubPath = source.file_path;
+  if (source.tracks && source.tracks.length > 0) {
+    const idx = trackParam ? parseInt(trackParam, 10) : 0;
+    if (Number.isNaN(idx) || idx < 0 || idx >= source.tracks.length) {
+      sendError(res, `Invalid track ${trackParam}; have ${source.tracks.length} tracks`, 400);
+      return;
+    }
+    resolvedSubPath = path.join(source.file_path, source.tracks[idx].file_path);
+  }
+
+  // filesystem sources resolve under SCAN_PATH; upload/gutenberg under LIBRARY_PATH.
+  const root = source.kind === 'filesystem' ? scanPath : libraryPath;
+  const filePath = path.resolve(root, resolvedSubPath);
+  const resolvedRoot = path.resolve(root);
+  if (!filePath.startsWith(resolvedRoot)) {
     sendError(res, 'Invalid file path', 403);
     return;
   }
@@ -198,12 +225,11 @@ filesRouter.get('/api/v1/files/:bookId', requireAuth, async (req: Request, res: 
   const me = req.userId!;
   const bookId = String(req.params.bookId);
 
-  const { data: book, error: bookErr } = await supabaseAdmin
-    .from('books')
-    .select('id, title')
-    .eq('id', bookId)
-    .maybeSingle();
-  if (bookErr || !book) {
+  const book = await selectOne<{ id: string; title: string }>(
+    'SELECT id, title FROM books WHERE id = $1',
+    [bookId]
+  );
+  if (!book) {
     sendError(res, 'Book not found', 404);
     return;
   }
@@ -219,8 +245,9 @@ filesRouter.get('/api/v1/files/:bookId', requireAuth, async (req: Request, res: 
     return;
   }
 
-  if (source.kind === 'upload' || source.kind === 'gutenberg') {
-    streamLocalFile(source, book.title as string, res, req.headers.range);
+  if (source.kind === 'upload' || source.kind === 'gutenberg' || source.kind === 'filesystem') {
+    const trackParam = typeof req.query.track === 'string' ? req.query.track : undefined;
+    streamLocalFile(source, book.title as string, res, req.headers.range, trackParam);
     return;
   }
 

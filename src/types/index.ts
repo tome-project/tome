@@ -119,8 +119,15 @@ export interface ReadingProgress {
 // Book sources (file providers)
 // ---------------------------------------------------------------------------
 
-export type BookSourceKind = 'upload' | 'gutenberg' | 'audiobookshelf' | 'calibre' | 'opds';
+export type BookSourceKind = 'upload' | 'gutenberg' | 'audiobookshelf' | 'calibre' | 'opds' | 'filesystem';
 export type MediaType = 'epub' | 'audiobook';
+
+export interface BookSourceTrack {
+  index: number;
+  title: string;
+  file_path: string;              // relative to the source's file_path (which is a directory for multi-track)
+  duration: number | null;
+}
 
 export interface BookSource {
   id: string;
@@ -132,6 +139,8 @@ export interface BookSource {
   external_id: string | null;
   external_url: string | null;
   media_server_id: string | null;
+  tracks: BookSourceTrack[] | null;
+  last_scanned_at: string | null;
   created_at: string;
 }
 

@@ -3,7 +3,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectOne, upsertOne, query } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 import {
   AudiobookshelfService,
@@ -41,28 +41,23 @@ function collectAuthors(meta: ABSLibraryItem['media']['metadata']): string[] {
   return [];
 }
 
-// Update a catalog row's authors when we have better data than what's stored.
-// Used when re-syncing an ABS item whose previous sync left authors empty.
-async function refreshCatalogBookAuthors(bookId: string, authors: string[]) {
-  const { data: book } = await supabaseAdmin
-    .from('books')
-    .select('*')
-    .eq('id', bookId)
-    .single();
+interface CatalogBookRow {
+  id: string;
+  title: string;
+  authors: string[] | null;
+  cover_url: string | null;
+}
+
+async function refreshCatalogBookAuthors(bookId: string, authors: string[]): Promise<CatalogBookRow> {
+  const book = await selectOne<CatalogBookRow>('SELECT * FROM books WHERE id = $1', [bookId]);
   if (!book) throw new Error(`Catalog book ${bookId} not found`);
-
-  const currentAuthors = (book.authors as string[] | null) ?? [];
-  if (currentAuthors.length > 0 || authors.length === 0) {
-    return book;
-  }
-
-  const { data: updated, error } = await supabaseAdmin
-    .from('books')
-    .update({ authors })
-    .eq('id', bookId)
-    .select()
-    .single();
-  if (error) throw new Error(`Failed to refresh authors for ${bookId}: ${error.message}`);
+  const currentAuthors = book.authors ?? [];
+  if (currentAuthors.length > 0 || authors.length === 0) return book;
+  const updated = await selectOne<CatalogBookRow>(
+    'UPDATE books SET authors = $1 WHERE id = $2 RETURNING *',
+    [authors, bookId]
+  );
+  if (!updated) throw new Error(`Failed to refresh authors for ${bookId}`);
   return updated;
 }
 
@@ -94,15 +89,19 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
     return;
   }
 
-  // Fetch + ownership check
-  const { data: server, error: serverErr } = await supabaseAdmin
-    .from('media_servers')
-    .select('*')
-    .eq('id', server_id)
-    .eq('owner_id', me)
-    .maybeSingle();
-  if (serverErr) {
-    sendError(res, serverErr.message, 500);
+  let server: {
+    id: string;
+    url: string;
+    kind: string;
+    token_encrypted: string;
+  } | null;
+  try {
+    server = await selectOne(
+      'SELECT id, url, kind, token_encrypted FROM media_servers WHERE id = $1 AND owner_id = $2',
+      [server_id, me]
+    );
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
     return;
   }
   if (!server) {
@@ -116,7 +115,7 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
 
   let token: string;
   try {
-    token = decryptToken(server.token_encrypted as string);
+    token = decryptToken(server.token_encrypted);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Token decryption failed';
     sendError(res, message, 500);
@@ -124,7 +123,7 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
   }
 
   try {
-    const abs = new AudiobookshelfService(server.url as string, token);
+    const abs = new AudiobookshelfService(server.url, token);
     const items = await abs.getLibraryItems(abs_library_id);
 
     let added = 0;
@@ -149,21 +148,14 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
 
         const primaryAuthor = authors[0] ?? 'Unknown';
 
-        // If we've synced this ABS item before, reuse the same catalog book
-        // row rather than letting ensureMinimalCatalogBook insert a duplicate.
-        // Duplicates happen when (title, author) dedup can't match — e.g. when
-        // ABS returns an empty authorName on one sync and a real one later.
+        // Reuse existing catalog book if we've synced this ABS item before.
         let catalogBookId: string | null = null;
-        const { data: existingSource } = await supabaseAdmin
-          .from('book_sources')
-          .select('book_id')
-          .eq('owner_id', me)
-          .eq('kind', 'audiobookshelf')
-          .eq('external_id', item.id)
-          .maybeSingle();
-        if (existingSource) {
-          catalogBookId = existingSource.book_id as string;
-        }
+        const existingSource = await selectOne<{ book_id: string }>(
+          `SELECT book_id FROM book_sources
+            WHERE owner_id = $1 AND kind = 'audiobookshelf' AND external_id = $2`,
+          [me, item.id]
+        );
+        if (existingSource) catalogBookId = existingSource.book_id;
 
         const catalogBook = catalogBookId
           ? await refreshCatalogBookAuthors(catalogBookId, authors)
@@ -179,9 +171,10 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
               isbn: meta.isbn ?? null,
             });
 
-        const { data: source, error: sourceErr } = await supabaseAdmin
-          .from('book_sources')
-          .upsert(
+        let sourceCreatedAt: string | null = null;
+        try {
+          const source = await upsertOne<{ created_at: string }>(
+            'book_sources',
             {
               book_id: catalogBook.id,
               owner_id: me,
@@ -192,30 +185,22 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
               media_server_id: server.id,
             },
             { onConflict: 'book_id,owner_id,kind' }
-          )
-          .select()
-          .single();
-        if (sourceErr) {
-          errors.push(`Failed to attach source for "${title}": ${sourceErr.message}`);
+          );
+          sourceCreatedAt = source?.created_at ?? null;
+        } catch (sourceErr) {
+          const message = sourceErr instanceof Error ? sourceErr.message : 'Source upsert failed';
+          errors.push(`Failed to attach source for "${title}": ${message}`);
           continue;
         }
 
-        // Cover: make sure there's a local file AND the catalog row points at
-        // it. Re-sync is idempotent — if a previous sync wrote the file but
-        // not the DB (or wrote the DB but not the file), we reconcile here.
-        //   1. If the file is on disk already, just stamp cover_url.
-        //   2. Else if ABS has a coverPath, fetch + write both.
-        //   3. Else leave as-is (book has no cover upstream).
+        // Cover: write a local thumbnail if missing and stamp catalog.cover_url.
         if (item.media.coverPath) {
           const dest = path.join(coversDir, `${catalogBook.id}.jpg`);
           const targetUrl = `/api/v1/covers/${catalogBook.id}`;
           try {
             if (fs.existsSync(dest)) {
               if (catalogBook.cover_url !== targetUrl) {
-                await supabaseAdmin
-                  .from('books')
-                  .update({ cover_url: targetUrl })
-                  .eq('id', catalogBook.id);
+                await query('UPDATE books SET cover_url = $1 WHERE id = $2', [targetUrl, catalogBook.id]);
               }
             } else {
               const buf = await abs.getItemCover(item.id);
@@ -224,10 +209,7 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
                   .resize({ width: 400, withoutEnlargement: true })
                   .jpeg()
                   .toFile(dest);
-                await supabaseAdmin
-                  .from('books')
-                  .update({ cover_url: targetUrl })
-                  .eq('id', catalogBook.id);
+                await query('UPDATE books SET cover_url = $1 WHERE id = $2', [targetUrl, catalogBook.id]);
               }
             }
           } catch {
@@ -236,15 +218,16 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
         }
 
         if (add_to_library !== false) {
-          await supabaseAdmin
-            .from('user_books')
-            .upsert(
-              { user_id: me, book_id: catalogBook.id, status: 'want' },
-              { onConflict: 'user_id,book_id', ignoreDuplicates: true }
-            );
+          await upsertOne(
+            'user_books',
+            { user_id: me, book_id: catalogBook.id, status: 'want' },
+            { onConflict: 'user_id,book_id', ignoreDuplicates: true }
+          );
         }
 
-        const wasNew = new Date(source.created_at as string).getTime() > Date.now() - 5_000;
+        const wasNew = sourceCreatedAt
+          ? new Date(sourceCreatedAt).getTime() > Date.now() - 5_000
+          : false;
         if (wasNew) added++;
         else reused++;
 
@@ -255,11 +238,10 @@ audiobookshelfRouter.post('/api/v1/abs/sync', requireAuth, async (req: Request, 
       }
     }
 
-    // Stamp last_sync_at on the server row for the UI
-    await supabaseAdmin
-      .from('media_servers')
-      .update({ last_sync_at: new Date().toISOString() })
-      .eq('id', server.id);
+    await query(
+      'UPDATE media_servers SET last_sync_at = $1 WHERE id = $2',
+      [new Date().toISOString(), server.id]
+    );
 
     sendSuccess(res, {
       server_id: server.id,

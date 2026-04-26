@@ -1,101 +1,67 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../services/supabase';
+import { selectMany } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const searchRouter = Router();
 
-// GET /api/v1/search?q=query — global search across books, clubs, highlights
+// GET /api/v1/search?q=query — global search across the caller's library +
+// clubs they belong to + their highlights. Joined queries return ranked-by-
+// recency rows; the existing client tolerates missing fields.
 searchRouter.get('/api/v1/search', requireAuth, async (req: Request, res: Response) => {
-  const query = req.query.q as string | undefined;
-
-  if (!query || query.trim().length === 0) {
+  const q = req.query.q as string | undefined;
+  if (!q || q.trim().length === 0) {
     sendError(res, 'Search query is required');
     return;
   }
-
-  const searchTerm = `%${query.trim()}%`;
+  const term = `%${q.trim()}%`;
+  const me = req.userId!;
 
   try {
-    // Search books (title, author) — up to 10 matches
-    const { data: books, error: booksError } = await supabaseAdmin
-      .from('books')
-      .select('id, title, author, cover_url, type')
-      .eq('added_by', req.userId!)
-      .or(`title.ilike.${searchTerm},author.ilike.${searchTerm}`)
-      .limit(10);
+    // Books in the caller's library matching title or any author.
+    const books = await selectMany<{ id: string; title: string; cover_url: string | null }>(
+      `SELECT b.id, b.title, b.cover_url
+         FROM user_books ub
+         JOIN books b ON b.id = ub.book_id
+        WHERE ub.user_id = $1
+          AND (b.title ILIKE $2 OR EXISTS (
+            SELECT 1 FROM unnest(b.authors) a WHERE a ILIKE $2
+          ))
+        ORDER BY ub.updated_at DESC
+        LIMIT 10`,
+      [me, term]
+    );
 
-    if (booksError) {
-      sendError(res, booksError.message, 500);
-      return;
-    }
+    // Clubs the user is a member of, name matches.
+    const clubs = await selectMany<{ id: string; name: string; member_count: number }>(
+      `SELECT c.id, c.name,
+              (SELECT count(*)::int FROM club_members cm WHERE cm.club_id = c.id) AS member_count
+         FROM clubs c
+         JOIN club_members m ON m.club_id = c.id
+        WHERE m.user_id = $1 AND c.name ILIKE $2
+        LIMIT 5`,
+      [me, term]
+    );
 
-    // Search clubs (name) — up to 5 matches
-    // First get club IDs the user is a member of
-    const { data: memberships, error: memberError } = await supabaseAdmin
-      .from('club_members')
-      .select('club_id')
-      .eq('user_id', req.userId!);
+    // Highlights of the caller's, joined with book title.
+    const highlights = await selectMany<{
+      id: string;
+      text: string;
+      note: string | null;
+      book_id: string;
+      book_title: string | null;
+    }>(
+      `SELECT h.id, h.text, h.note, h.book_id, b.title AS book_title
+         FROM highlights h
+         LEFT JOIN books b ON b.id = h.book_id
+        WHERE h.user_id = $1 AND h.text ILIKE $2
+        ORDER BY h.created_at DESC
+        LIMIT 5`,
+      [me, term]
+    );
 
-    if (memberError) {
-      sendError(res, memberError.message, 500);
-      return;
-    }
-
-    let clubs: unknown[] = [];
-    if (memberships && memberships.length > 0) {
-      const clubIds = memberships.map((m) => m.club_id);
-
-      const { data: clubResults, error: clubsError } = await supabaseAdmin
-        .from('clubs')
-        .select(`
-          id, name,
-          club_members (user_id)
-        `)
-        .in('id', clubIds)
-        .ilike('name', searchTerm)
-        .limit(5);
-
-      if (clubsError) {
-        sendError(res, clubsError.message, 500);
-        return;
-      }
-
-      clubs = (clubResults || []).map((club: any) => ({
-        id: club.id,
-        name: club.name,
-        member_count: club.club_members?.length || 0,
-      }));
-    }
-
-    // Search highlights (text) — up to 5 matches
-    const { data: highlights, error: highlightsError } = await supabaseAdmin
-      .from('highlights')
-      .select(`
-        id, text, note, book_id,
-        books:book_id (title)
-      `)
-      .eq('user_id', req.userId!)
-      .ilike('text', searchTerm)
-      .limit(5);
-
-    if (highlightsError) {
-      sendError(res, highlightsError.message, 500);
-      return;
-    }
-
-    sendSuccess(res, {
-      books: books || [],
-      clubs,
-      highlights: (highlights || []).map((h: any) => ({
-        id: h.id,
-        text: h.text,
-        note: h.note,
-        book_id: h.book_id,
-        book_title: h.books?.title || null,
-      })),
-    });
-  } catch (err: any) {
-    sendError(res, err.message || 'Search failed', 500);
+    sendSuccess(res, { books, clubs, highlights });
+  } catch (err) {
+    sendError(res, err instanceof Error ? err.message : 'Search failed', 500);
   }
 });
