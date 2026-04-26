@@ -24,21 +24,23 @@ discussionsRouter.get(
       }
 
       // Spoiler protection: when no explicit chapter filter, cap at the
-      // user's current reading position on the club's book.
+      // user's current chapter on the club's book. Default to 1 so a member
+      // who hasn't started (no progress row, or progress without a chapter)
+      // still sees chapter 1, never later.
       let chapterCap: number | null = null;
       if (chapter === undefined) {
+        chapterCap = 1;
         const club = await selectOne<{ book_id: string }>(
           'SELECT book_id FROM clubs WHERE id = $1',
           [clubId]
         );
         if (club) {
-          const progress = await selectOne<{ position: string }>(
-            'SELECT position FROM reading_progress WHERE user_id = $1 AND book_id = $2',
+          const progress = await selectOne<{ chapter: number | null }>(
+            'SELECT chapter FROM reading_progress WHERE user_id = $1 AND book_id = $2',
             [me, club.book_id]
           );
-          if (progress) {
-            const cur = parseInt(progress.position, 10);
-            if (!Number.isNaN(cur)) chapterCap = cur;
+          if (progress?.chapter && progress.chapter > chapterCap) {
+            chapterCap = progress.chapter;
           }
         }
       }

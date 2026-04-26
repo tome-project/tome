@@ -198,6 +198,29 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
     const bookById = new Map(books.map((b) => [b.id, b]));
     const clubById = new Map(clubs.map((c) => [c.id, c]));
 
+    // Spoiler gating: drop chapter-tagged events (discussions, highlights)
+    // whose chapter is past the viewer's own reading position. Mirrors the
+    // /api/v1/clubs/:id/discussions cap so the activity feed can't surface
+    // metadata that the discussions endpoint itself hides. The viewer's own
+    // events are always visible — it's their own history.
+    const myChapterByBook = new Map<string, number>();
+    if (bookIdSet.size > 0) {
+      const myProgress = await selectMany<{ book_id: string; chapter: number | null }>(
+        'SELECT book_id, chapter FROM reading_progress WHERE user_id = $1 AND book_id = ANY($2)',
+        [me, Array.from(bookIdSet)]
+      );
+      for (const p of myProgress) {
+        if (p.chapter && p.chapter > 0) myChapterByBook.set(p.book_id, p.chapter);
+      }
+    }
+    const spoilerOk = (actorId: string, bookId: string | null | undefined, chapter: number | null) => {
+      if (actorId === me) return true;
+      if (chapter == null) return true;
+      if (!bookId) return true;
+      const cap = myChapterByBook.get(bookId) ?? 1;
+      return chapter <= cap;
+    };
+
     const events: ActivityEvent[] = [];
     for (const ub of userBooks) {
       const book = bookById.get(ub.book_id);
@@ -222,6 +245,7 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
       }
     }
     for (const hl of highlights) {
+      if (!spoilerOk(hl.user_id, hl.book_id, hl.chapter)) continue;
       const book = bookById.get(hl.book_id);
       events.push({
         type: 'highlight',
@@ -258,6 +282,7 @@ activityRouter.get('/api/v1/activity', requireAuth, async (req: Request, res: Re
     for (const dc of discussions) {
       const club = clubById.get(dc.club_id);
       if (!club) continue;
+      if (!spoilerOk(dc.user_id, club.book_id, dc.chapter)) continue;
       events.push({
         type: 'discussion',
         user_id: dc.user_id,

@@ -14,7 +14,7 @@ export const progressRouter = Router();
 // first progress > 0, transition 'want' → 'reading'. Both are best-effort.
 progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
-  const { book_id, position, percentage, source_kind } = req.body ?? {};
+  const { book_id, position, percentage, source_kind, chapter } = req.body ?? {};
 
   if (!book_id || position === undefined || percentage === undefined) {
     sendError(res, 'book_id, position, and percentage are required');
@@ -35,6 +35,14 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
   };
   if (source_kind !== undefined) {
     upsertRecord.source_kind = source_kind === null ? null : String(source_kind);
+  }
+  if (chapter !== undefined) {
+    if (chapter === null) {
+      upsertRecord.chapter = null;
+    } else {
+      const ch = Number(chapter);
+      if (Number.isFinite(ch) && ch >= 1) upsertRecord.chapter = Math.floor(ch);
+    }
   }
 
   try {
