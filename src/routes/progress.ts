@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { selectOne, upsertOne, query } from '../services/db';
+import { selectOne, selectMany, upsertOne, query } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 export const progressRouter = Router();
@@ -75,6 +75,97 @@ progressRouter.post('/api/v1/progress', requireAuth, async (req: Request, res: R
     sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
 });
+
+// GET /api/v1/progress/:bookId/friends — visible friends' progress on this
+// book, used to paint pace markers on the player's whole-book hairline.
+//
+// Visibility rules: only accepted friendships, only friends whose
+// `activity_privacy` isn't 'private', and only their reading_progress rows
+// for the requested book. We deliberately don't read user_books status here
+// — friends who started and stopped (status='dnf') still belong on the
+// timeline so the user can see "we both bailed at the same chapter".
+progressRouter.get(
+  '/api/v1/progress/:bookId/friends',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const me = req.userId!;
+    const bookId = String(req.params.bookId);
+    try {
+      const friendships = await selectMany<{ user_a_id: string; user_b_id: string }>(
+        `SELECT user_a_id, user_b_id FROM friendships
+          WHERE status = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)`,
+        [me]
+      );
+      const friendIds = friendships.map((f) =>
+        f.user_a_id === me ? f.user_b_id : f.user_a_id
+      );
+      if (friendIds.length === 0) {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+
+      const profiles = await selectMany<{
+        user_id: string;
+        handle: string;
+        display_name: string;
+        avatar_url: string | null;
+        activity_privacy: string;
+      }>(
+        `SELECT user_id, handle, display_name, avatar_url, activity_privacy
+           FROM user_profiles WHERE user_id = ANY($1)`,
+        [friendIds]
+      );
+      const profilesById = new Map<string, (typeof profiles)[number]>();
+      const visibleIds: string[] = [];
+      for (const p of profiles) {
+        if (p.activity_privacy !== 'private') {
+          profilesById.set(p.user_id, p);
+          visibleIds.push(p.user_id);
+        }
+      }
+      if (visibleIds.length === 0) {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+
+      const progress = await selectMany<{
+        user_id: string;
+        percentage: string | number;
+        position: string;
+        chapter: number | null;
+        updated_at: string;
+      }>(
+        `SELECT user_id, percentage, position, chapter, updated_at
+           FROM reading_progress
+          WHERE book_id = $1 AND user_id = ANY($2) AND percentage > 0
+          ORDER BY percentage ASC`,
+        [bookId, visibleIds]
+      );
+
+      const items = progress.map((p) => {
+        const prof = profilesById.get(p.user_id);
+        return {
+          user_id: p.user_id,
+          percentage: typeof p.percentage === 'string' ? Number(p.percentage) : p.percentage,
+          position: p.position,
+          chapter: p.chapter,
+          updated_at: p.updated_at,
+          profile: prof
+            ? {
+                handle: prof.handle,
+                display_name: prof.display_name,
+                avatar_url: prof.avatar_url,
+              }
+            : null,
+        };
+      });
+
+      sendSuccess(res, { items });
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+    }
+  }
+);
 
 // GET /api/v1/progress/:bookId — current reading position
 progressRouter.get('/api/v1/progress/:bookId', requireAuth, async (req: Request, res: Response) => {
