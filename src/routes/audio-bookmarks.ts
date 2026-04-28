@@ -22,6 +22,7 @@ audioBookmarksRouter.get(
           ORDER BY position_ms ASC`,
         [req.userId!, bookId]
       );
+      console.log('[bookmarks GET] user=%s book=%s rows=%d ua=%s', req.userId, bookId, (data as unknown[]).length, req.headers['user-agent']);
       sendSuccess(res, data);
     } catch (err) {
       sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
