@@ -1,9 +1,64 @@
 import { Router, Request, Response } from 'express';
+import path from 'path';
+import { spawn } from 'child_process';
 import { requireAuth } from '../middleware/auth';
 import { selectOne, selectMany } from '../services/db';
 import { decryptToken } from '../services/crypto';
 import { AudiobookshelfService } from '../services/audiobookshelf';
 import { sendSuccess, sendError } from '../utils';
+
+const libraryPath = process.env.LIBRARY_PATH || './library';
+const scanPath = process.env.SCAN_PATH || libraryPath;
+
+interface SourceTrack {
+  index: number;
+  title: string;
+  file_path: string;
+  duration: number | null;
+}
+
+interface FfprobeChaptersOutput {
+  chapters?: Array<{
+    id?: number;
+    start_time?: string;
+    end_time?: string;
+    tags?: { title?: string };
+  }>;
+}
+
+// Run ffprobe -show_chapters on a single file. Returns the parsed chapter
+// list (one entry per embedded chapter atom in m4b/m4a) or [] when the file
+// has none. We deliberately keep this stateless and per-request — ffprobe
+// on a local m4b is ~50-200ms, and chapters endpoint is called once per
+// player open. If contention becomes a thing, swap in an LRU keyed by
+// (path, mtime).
+function ffprobeChapters(filePath: string): Promise<FfprobeChaptersOutput> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-v', 'error',
+      '-print_format', 'json',
+      '-show_chapters',
+      filePath,
+    ];
+    const child = spawn('ffprobe', args);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => { stdout += c; });
+    child.stderr.on('data', (c) => { stderr += c; });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffprobe exited ${code}: ${stderr.trim()}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as FfprobeChaptersOutput);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    child.on('error', reject);
+  });
+}
 
 export const booksRouter = Router();
 
@@ -102,7 +157,15 @@ booksRouter.get('/api/v1/books/:id/community', requireAuth, async (req: Request,
   }
 });
 
-// GET /api/v1/books/:id/chapters — audiobook chapter list from ABS source
+// GET /api/v1/books/:id/chapters — audiobook chapter list. Three source
+// shapes feed the same response:
+//   1. Audiobookshelf: pull chapters from the upstream item.
+//   2. Filesystem multi-track (folder of mp3s, one per chapter): synthesize
+//      from `tracks[]`, each track becomes one chapter with cumulative
+//      absolute start/end times.
+//   3. Filesystem single-file (m4b/m4a): run ffprobe -show_chapters at
+//      request time. ~50-200ms on a local file; cheap enough to skip a
+//      cache layer for v1.
 booksRouter.get('/api/v1/books/:id/chapters', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   const bookId = String(req.params.id);
@@ -113,46 +176,106 @@ booksRouter.get('/api/v1/books/:id/chapters', requireAuth, async (req: Request, 
       owner_id: string;
       external_id: string | null;
       media_server_id: string | null;
+      file_path: string | null;
+      tracks: SourceTrack[] | null;
     }>('SELECT * FROM book_sources WHERE book_id = $1', [bookId]);
 
-    const abs = sources.filter((s) => s.kind === 'audiobookshelf');
-    if (abs.length === 0) {
-      sendSuccess(res, { chapters: [] });
-      return;
-    }
-    const source = abs.find((s) => s.owner_id === me) ?? abs[0];
-    if (!source.media_server_id || !source.external_id) {
+    if (sources.length === 0) {
       sendSuccess(res, { chapters: [] });
       return;
     }
 
-    const server = await selectOne<{ url: string; token_encrypted: string }>(
-      'SELECT url, token_encrypted FROM media_servers WHERE id = $1',
-      [source.media_server_id]
-    );
-    if (!server) {
-      sendSuccess(res, { chapters: [] });
+    // Prefer the caller's own source, else any accessible row (RLS already
+    // enforces visibility upstream of this route). Within that, prefer ABS
+    // > filesystem so books that exist in both can keep ABS chapter
+    // metadata if available.
+    const accessible = [
+      ...sources.filter((s) => s.owner_id === me),
+      ...sources.filter((s) => s.owner_id !== me),
+    ];
+    const abs = accessible.find((s) => s.kind === 'audiobookshelf');
+    const fs = accessible.find((s) => s.kind === 'filesystem');
+
+    // ── ABS path ──
+    if (abs && abs.media_server_id && abs.external_id) {
+      const server = await selectOne<{ url: string; token_encrypted: string }>(
+        'SELECT url, token_encrypted FROM media_servers WHERE id = $1',
+        [abs.media_server_id]
+      );
+      if (server) {
+        try {
+          const token = decryptToken(server.token_encrypted);
+          const absSvc = new AudiobookshelfService(server.url, token);
+          const item = await absSvc.getItemDetail(abs.external_id);
+          const raw = item?.media.chapters ?? [];
+          if (raw.length > 0) {
+            sendSuccess(res, {
+              chapters: raw.map((c, i) => ({
+                index: i,
+                start_ms: Math.round(c.start * 1000),
+                end_ms: Math.round(c.end * 1000),
+                title: c.title,
+              })),
+            });
+            return;
+          }
+        } catch {
+          // Fall through to the filesystem path if available.
+        }
+      }
+    }
+
+    // ── Filesystem multi-track ──
+    if (fs && fs.tracks && fs.tracks.length > 0) {
+      let cursorMs = 0;
+      const chapters = fs.tracks.map((t, i) => {
+        const durMs = t.duration != null ? Math.round(t.duration * 1000) : 0;
+        const start = cursorMs;
+        const end = cursorMs + durMs;
+        cursorMs = end;
+        return {
+          index: i,
+          start_ms: start,
+          end_ms: end,
+          title: t.title || `Chapter ${i + 1}`,
+        };
+      });
+      sendSuccess(res, { chapters });
       return;
     }
 
-    let token: string;
-    try {
-      token = decryptToken(server.token_encrypted);
-    } catch {
-      sendSuccess(res, { chapters: [] });
-      return;
+    // ── Filesystem single-file (ffprobe -show_chapters) ──
+    if (fs && fs.file_path) {
+      const root = path.resolve(scanPath);
+      const filePath = path.resolve(root, fs.file_path);
+      // Defense-in-depth: never let a malformed file_path escape the scan
+      // root. The scanner stores relative paths so this should always hold.
+      if (!filePath.startsWith(root)) {
+        sendSuccess(res, { chapters: [] });
+        return;
+      }
+      try {
+        const probe = await ffprobeChapters(filePath);
+        const raw = probe.chapters ?? [];
+        const chapters = raw.map((c, i) => {
+          const start = parseFloat(c.start_time ?? '0');
+          const end = parseFloat(c.end_time ?? '0');
+          return {
+            index: i,
+            start_ms: Number.isFinite(start) ? Math.round(start * 1000) : 0,
+            end_ms: Number.isFinite(end) ? Math.round(end * 1000) : 0,
+            title: c.tags?.title?.trim() || `Chapter ${i + 1}`,
+          };
+        });
+        sendSuccess(res, { chapters });
+        return;
+      } catch {
+        sendSuccess(res, { chapters: [] });
+        return;
+      }
     }
 
-    const absSvc = new AudiobookshelfService(server.url, token);
-    const item = await absSvc.getItemDetail(source.external_id);
-    const raw = item?.media.chapters ?? [];
-    const chapters = raw.map((c, i) => ({
-      index: i,
-      start_ms: Math.round(c.start * 1000),
-      end_ms: Math.round(c.end * 1000),
-      title: c.title,
-    }));
-    sendSuccess(res, { chapters });
+    sendSuccess(res, { chapters: [] });
   } catch (err) {
     sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
   }
