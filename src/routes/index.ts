@@ -9,6 +9,7 @@ export { gutenbergRouter } from './gutenberg';
 export { statsRouter } from './stats';
 export { coversRouter } from './covers';
 export { highlightsRouter } from './highlights';
+export { audioBookmarksRouter } from './audio-bookmarks';
 export { readingSessionsRouter } from './reading-sessions';
 export { activityRouter } from './activity';
 export { goalsRouter } from './goals';
