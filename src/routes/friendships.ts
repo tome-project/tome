@@ -25,6 +25,167 @@ interface PublicProfileRow {
   avatar_url: string | null;
 }
 
+// GET /api/v1/friendships/incoming-count — count of pending requests waiting
+// on me. Cheap dedicated endpoint so the bottom-nav badge can poll without
+// hauling the full /friendships payload (3 groups + decorated profiles).
+friendshipsRouter.get(
+  '/api/v1/friendships/incoming-count',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const me = req.userId!;
+    try {
+      const row = await selectOne<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+           FROM friendships
+          WHERE status = 'pending'
+            AND (user_a_id = $1 OR user_b_id = $1)
+            AND requested_by <> $1`,
+        [me]
+      );
+      sendSuccess(res, { count: Number(row?.count ?? 0) });
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+    }
+  }
+);
+
+// GET /api/v1/friendships/suggestions — "people you may know" via friends-of-
+// friends. Returns up to 10 candidates, sorted by mutual-count desc. Excludes
+// anyone already in any friendship row with me (accepted, pending either
+// direction, or blocked) so the list is purely actionable.
+//
+// The query is two passes for clarity: first pull my circle, then pull each
+// circle-member's circle and aggregate. Linear in (my circle × their circles)
+// which is fine at v1 scale (<<1k friends-of-friends per user). If this gets
+// hot we can replace with a single recursive CTE.
+friendshipsRouter.get(
+  '/api/v1/friendships/suggestions',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const me = req.userId!;
+    const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 10));
+    try {
+      const myFriends = await selectMany<{ other_id: string }>(
+        `SELECT CASE WHEN user_a_id = $1 THEN user_b_id ELSE user_a_id END AS other_id
+           FROM friendships
+          WHERE status = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)`,
+        [me]
+      );
+      const friendIds = myFriends.map((r) => r.other_id);
+      if (friendIds.length === 0) {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+
+      // Excluded set = me + my circle + anyone I have a pending/blocked row
+      // with. That second set isn't covered by friendIds (those are only the
+      // accepted ones).
+      const myAnyEdges = await selectMany<{ other_id: string }>(
+        `SELECT CASE WHEN user_a_id = $1 THEN user_b_id ELSE user_a_id END AS other_id
+           FROM friendships
+          WHERE user_a_id = $1 OR user_b_id = $1`,
+        [me]
+      );
+      const excluded = new Set<string>([me, ...myAnyEdges.map((r) => r.other_id)]);
+
+      // Pull friends-of-friends and tally how many of my friends each candidate
+      // shares with me. SQL aggregates this in one shot.
+      const candidates = await selectMany<{
+        candidate_id: string;
+        mutual_count: string;
+      }>(
+        `SELECT candidate_id, COUNT(*)::text AS mutual_count FROM (
+           SELECT
+             CASE WHEN user_a_id = ANY($1) THEN user_b_id ELSE user_a_id END AS candidate_id
+           FROM friendships
+           WHERE status = 'accepted'
+             AND (user_a_id = ANY($1) OR user_b_id = ANY($1))
+         ) AS edges
+         WHERE candidate_id <> ALL($2::uuid[])
+         GROUP BY candidate_id
+         ORDER BY mutual_count DESC, candidate_id ASC
+         LIMIT $3`,
+        [friendIds, Array.from(excluded), limit]
+      );
+
+      if (candidates.length === 0) {
+        sendSuccess(res, { items: [] });
+        return;
+      }
+
+      const profiles = await selectMany<PublicProfileRow & { activity_privacy: string }>(
+        `SELECT user_id, handle, display_name, bio, avatar_url, activity_privacy
+           FROM user_profiles WHERE user_id = ANY($1)`,
+        [candidates.map((c) => c.candidate_id)]
+      );
+      const profById = new Map(profiles.map((p) => [p.user_id, p]));
+
+      const items = candidates
+        .map((c) => {
+          const p = profById.get(c.candidate_id);
+          if (!p) return null;
+          return {
+            user_id: p.user_id,
+            handle: p.handle,
+            display_name: p.display_name,
+            avatar_url: p.avatar_url,
+            mutual_count: Number(c.mutual_count),
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      sendSuccess(res, { items });
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+    }
+  }
+);
+
+// GET /api/v1/friendships/mutual/:userId — count + list of mutual friends
+// between me and another user. Used by the public-profile "X mutual friends"
+// pill so users have social-graph context before deciding to add someone.
+friendshipsRouter.get(
+  '/api/v1/friendships/mutual/:userId',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const me = req.userId!;
+    const them = String(req.params.userId);
+    if (me === them) {
+      sendSuccess(res, { count: 0, items: [] });
+      return;
+    }
+    try {
+      const rows = await selectMany<{ user_id: string }>(
+        `SELECT user_id FROM (
+           SELECT CASE WHEN user_a_id = $1 THEN user_b_id ELSE user_a_id END AS user_id
+             FROM friendships
+            WHERE status = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)
+           INTERSECT
+           SELECT CASE WHEN user_a_id = $2 THEN user_b_id ELSE user_a_id END AS user_id
+             FROM friendships
+            WHERE status = 'accepted' AND (user_a_id = $2 OR user_b_id = $2)
+         ) AS mutual`,
+        [me, them]
+      );
+      if (rows.length === 0) {
+        sendSuccess(res, { count: 0, items: [] });
+        return;
+      }
+      // Profile lookup is capped at 6 since the UI only shows a few avatars
+      // anyway; full count is still in `count`.
+      const idsForPreview = rows.slice(0, 6).map((r) => r.user_id);
+      const profiles = await selectMany<PublicProfileRow>(
+        `SELECT user_id, handle, display_name, bio, avatar_url
+           FROM user_profiles WHERE user_id = ANY($1)`,
+        [idsForPreview]
+      );
+      sendSuccess(res, { count: rows.length, items: profiles });
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+    }
+  }
+);
+
 friendshipsRouter.get('/api/v1/friendships', requireAuth, async (req: Request, res: Response) => {
   const me = req.userId!;
   try {
