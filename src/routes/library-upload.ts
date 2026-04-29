@@ -13,6 +13,28 @@ const libraryPath = process.env.LIBRARY_PATH || './library';
 const uploadsDir = path.join(libraryPath, 'uploads');
 const coversDir = path.join(libraryPath, 'covers');
 
+// When TOME_OWNER_USER_ID is set, the server is treated as a personal
+// instance: only the owner and their accepted friends may upload files into
+// this server's filesystem. App Store users (cold installers) hitting a
+// personal server should use the device-import flow instead.
+// When unset, the server is in self-hosted/open mode: any authenticated
+// user can upload (the default for someone running Tome on their own box
+// with one account).
+const ownerUserId = process.env.TOME_OWNER_USER_ID?.trim();
+
+async function userMayUpload(userId: string): Promise<boolean> {
+  if (!ownerUserId) return true;
+  if (userId === ownerUserId) return true;
+  const friend = await selectOne(
+    `SELECT 1 AS ok FROM friendships
+      WHERE status = 'accepted'
+        AND user_a_id = LEAST($1::uuid, $2::uuid)
+        AND user_b_id = GREATEST($1::uuid, $2::uuid)`,
+    [userId, ownerUserId],
+  );
+  return !!friend;
+}
+
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
 
@@ -105,6 +127,16 @@ libraryUploadRouter.post('/api/v1/library/upload', requireAuth, runUpload, async
   const file = req.file;
   if (!file) {
     sendError(res, 'Missing file field "file"', 400);
+    return;
+  }
+
+  if (!(await userMayUpload(me))) {
+    await fs.promises.unlink(file.path).catch(() => {});
+    sendError(
+      res,
+      'Uploads are restricted on this server. Use "Import from device" to keep the file on your phone, or ask the host to share access.',
+      403,
+    );
     return;
   }
 
