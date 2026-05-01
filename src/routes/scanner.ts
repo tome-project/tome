@@ -139,8 +139,24 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
         added++;
       }
 
+      // Also add the book to the owner's shelf so it shows up in their
+      // Library tab on first scan. Idempotent — if the row already
+      // exists (the owner manually added it), upsert preserves their
+      // status / rating / review.
+      await hub.from('user_books').upsert(
+        {
+          user_id: identity.ownerId,
+          book_id: catalog.id,
+          status: 'want',
+          source: 'library_server',
+        },
+        { onConflict: 'user_id,book_id', ignoreDuplicates: true },
+      );
+
       // Cover (best-effort): write a 400px JPEG to LIBRARY_PATH/covers/
-      // and stamp catalog.cover_url if not already set.
+      // and stamp catalog.cover_url with the absolute URL of this
+      // server's covers route. Using PUBLIC_URL when set so clients
+      // (potentially behind a tunnel) can fetch from anywhere.
       if (book.coverImage && !catalog.cover_url) {
         const dest = path.join(coversDir, `${catalog.id}.jpg`);
         try {
@@ -150,12 +166,13 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
               .jpeg()
               .toFile(dest);
           }
-          // Cover URL points to this server — clients fetch via the
-          // covers route. Could later fall back to Open Library cover
-          // CDN for portability across servers.
+          const baseUrl = (process.env.PUBLIC_URL ?? '').replace(/\/$/, '');
+          const coverUrl = baseUrl
+            ? `${baseUrl}/covers/${catalog.id}`
+            : `/covers/${catalog.id}`;
           await hub
             .from('books')
-            .update({ cover_url: `/covers/${catalog.id}` })
+            .update({ cover_url: coverUrl })
             .eq('id', catalog.id)
             .is('cover_url', null);
         } catch {
