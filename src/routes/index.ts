@@ -1,27 +1,13 @@
+// v0.6 library-server-only exports. The hub-side routes (auth, profiles,
+// friendships, clubs, etc.) are no longer registered — see ../index.ts.
+// Their source files remain on disk under this directory until the
+// follow-up cleanup PR removes them; treat them as deprecated.
 export { healthRouter } from './health';
-export { authRouter } from './auth';
-export { booksRouter } from './books';
-export { progressRouter } from './progress';
-export { clubsRouter } from './clubs';
-export { discussionsRouter } from './discussions';
 export { filesRouter } from './files';
-export { gutenbergRouter } from './gutenberg';
-export { statsRouter } from './stats';
 export { coversRouter } from './covers';
-export { highlightsRouter } from './highlights';
-export { audioBookmarksRouter } from './audio-bookmarks';
-export { readingSessionsRouter } from './reading-sessions';
-export { activityRouter } from './activity';
-export { goalsRouter } from './goals';
-export { searchRouter } from './search';
-export { audiobookshelfRouter } from './audiobookshelf';
-export { catalogRouter } from './catalog';
-export { profilesRouter } from './profiles';
-export { friendshipsRouter } from './friendships';
-export { userBooksRouter } from './user-books';
-export { serversRouter } from './servers';
-export { serverSharesRouter } from './server-shares';
-export { libraryUploadRouter } from './library-upload';
-export { libraryImportDeviceRouter } from './library-import-device';
-export { invitesRouter } from './invites';
 export { scannerRouter } from './scanner';
+export { gutenbergRouter } from './gutenberg';
+
+// v0.6 federation routes (new)
+export { pairingRouter } from './pairing';
+export { setupRouter } from './setup';

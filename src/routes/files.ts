@@ -1,10 +1,17 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { requireAuth } from '../middleware/auth';
+import { requireSupabaseAuth, requireLibraryAccess } from '../middleware/supabase-auth';
 import { selectOne, selectMany } from '../services/db';
 import { decryptToken } from '../services/crypto';
 import { sendError } from '../utils';
+
+// TODO(v0.6): the body of this route still queries the legacy
+// `book_sources` table. Rewrite it to query `library_server_books` via
+// the hub Supabase client (server-side service role) — the file_path it
+// returns is the relative path on this library server's disk. The
+// requireSupabaseAuth + requireLibraryAccess middleware below already
+// enforce the new auth model.
 
 export const filesRouter = Router();
 
@@ -221,7 +228,7 @@ function streamLocalFile(
 // GET /api/v1/files/:bookId — stream a book file via whichever source the
 // caller can access. Local (upload/gutenberg) reads from disk; ABS proxies
 // through the stored media_server credential.
-filesRouter.get('/api/v1/files/:bookId', requireAuth, async (req: Request, res: Response) => {
+filesRouter.get('/files/:bookId', requireSupabaseAuth, requireLibraryAccess, async (req: Request, res: Response) => {
   const me = req.userId!;
   const bookId = String(req.params.bookId);
 
