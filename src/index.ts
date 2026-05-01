@@ -11,7 +11,6 @@ import {
   filesRouter,
   coversRouter,
   scannerRouter,
-  gutenbergRouter,
   // v0.6 federation routes
   pairingRouter,
   setupRouter,
@@ -62,7 +61,6 @@ app.use(pairingRouter);   // POST /pair (CLI alternative to the wizard)
 app.use(filesRouter);     // GET /files/:bookId → range-request file streaming
 app.use(coversRouter);    // GET /covers/:bookId → cover image
 app.use(scannerRouter);   // POST /scan → trigger a library scan (manual)
-app.use(gutenbergRouter); // GET /gutenberg/* → Project Gutenberg proxy
 
 app.use(errorHandler);
 
