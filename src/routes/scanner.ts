@@ -2,51 +2,94 @@ import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
 import { Router, Request, Response } from 'express';
-import { requireAuth } from '../middleware/auth';
-import { selectOne, upsertOne, query } from '../services/db';
-import { sendError, sendSuccess } from '../utils';
+import { requireSupabaseAuth } from '../middleware/supabase-auth';
+import { hubClient } from '../services/hub';
+import { loadIdentity } from '../services/server-identity';
 import { scanLibrary, ScannedBook } from '../services/scanner';
-import { ensureMinimalCatalogBook } from '../services/catalog';
-
-const libraryPath = process.env.LIBRARY_PATH || './library';
-// Scan source root. Defaults to LIBRARY_PATH so dev/local setups (where the
-// scanner walks the same dir Tome owns for uploads/covers) keep working
-// without explicit configuration. In production, point this at a read-only
-// mount of the host's audiobook + ebook directories so Tome can ingest
-// existing libraries without copying them.
-const scanPath = process.env.SCAN_PATH || libraryPath;
-const coversDir = path.join(libraryPath, 'covers');
-if (!fs.existsSync(coversDir)) {
-  fs.mkdirSync(coversDir, { recursive: true });
-}
 
 export const scannerRouter = Router();
 
-// POST /api/v1/scanner/sync — walk LIBRARY_PATH and ingest every supported
-// book file (m4b/m4a/epub) into the caller's library.
-//
-// Body: { subdir?: string, add_to_library?: boolean }
-//   - subdir: optional sub-path under LIBRARY_PATH to limit the scan
-//   - add_to_library: when true (default), each scanned book is auto-added
-//     to user_books with status='want'
-//
-// Per scanned file:
-//   1. Resolve catalog book via existing book_sources(file_path) match,
-//      else ensureMinimalCatalogBook (ISBN-first via OpenLibrary, else
-//      title+author dedup, else minimal insert).
-//   2. Upsert book_sources row (kind='filesystem', owner_id=me,
-//      file_path=relative-to-library) — unique per (book, owner, kind).
-//   3. Best-effort cover write to <library>/covers/<book_id>.jpg.
-//   4. Stamp last_scanned_at on the source.
-scannerRouter.post('/api/v1/scanner/sync', requireAuth, async (req: Request, res: Response) => {
-  const me = req.userId!;
-  const { subdir, add_to_library } = (req.body ?? {}) as { subdir?: string; add_to_library?: boolean };
+const libraryPath = process.env.LIBRARY_PATH || './library';
+const coversDir = path.join(libraryPath, 'covers');
+if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
 
-  // Resolve and harden the scan root: must stay inside SCAN_PATH.
-  const scanBase = path.resolve(scanPath);
+interface CatalogBook {
+  id: string;
+  title: string;
+  authors: string[];
+  cover_url: string | null;
+}
+
+/// Look up (or create) a catalog row for a scanned book. Dedup order:
+///   1. ISBN-13 / ISBN-10 if the file's metadata has it.
+///   2. Exact (title, primary_author) match (case-sensitive — same as the
+///      legacy ensureMinimalCatalogBook behavior).
+///   3. Insert a new minimal row.
+async function ensureCatalog(book: ScannedBook): Promise<CatalogBook> {
+  const hub = hubClient();
+  const isbn = book.metadata.isbn?.replace(/[-\s]/g, '');
+
+  if (isbn && isbn.length === 13) {
+    const { data } = await hub.from('books').select('*').eq('isbn_13', isbn).maybeSingle();
+    if (data) return data as CatalogBook;
+  }
+  if (isbn && isbn.length === 10) {
+    const { data } = await hub.from('books').select('*').eq('isbn_10', isbn).maybeSingle();
+    if (data) return data as CatalogBook;
+  }
+
+  // Title + first-author match.
+  const primary = book.metadata.authors[0];
+  if (primary) {
+    const { data } = await hub
+      .from('books')
+      .select('*')
+      .eq('title', book.metadata.title)
+      .contains('authors', [primary])
+      .maybeSingle();
+    if (data) return data as CatalogBook;
+  }
+
+  // Insert minimal row.
+  const { data: inserted, error } = await hub
+    .from('books')
+    .insert({
+      title: book.metadata.title,
+      subtitle: book.metadata.subtitle ?? null,
+      authors: book.metadata.authors,
+      description: book.metadata.description ?? null,
+      publisher: book.metadata.publisher ?? null,
+      published_year: book.metadata.publishedYear ?? null,
+      language: book.metadata.language ?? 'en',
+      isbn_13: isbn && isbn.length === 13 ? isbn : null,
+      isbn_10: isbn && isbn.length === 10 ? isbn : null,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return inserted as CatalogBook;
+}
+
+/// POST /scan — walk LIBRARY_PATH and register every supported book in
+/// library_server_books. Owner-only.
+///
+/// Body (optional): { subdir?: string }
+scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Response) => {
+  const identity = loadIdentity();
+  if (!identity) {
+    res.status(503).json({ success: false, error: 'Library server not paired' });
+    return;
+  }
+  if (req.supabaseUserId !== identity.ownerId) {
+    res.status(403).json({ success: false, error: 'Only the library owner can trigger a scan' });
+    return;
+  }
+
+  const subdir = (req.body?.subdir ?? '').toString();
+  const scanBase = path.resolve(libraryPath);
   const scanRoot = subdir ? path.resolve(scanBase, subdir) : scanBase;
   if (!scanRoot.startsWith(scanBase)) {
-    sendError(res, 'subdir must be inside SCAN_PATH', 400);
+    res.status(400).json({ success: false, error: 'subdir must be inside LIBRARY_PATH' });
     return;
   }
 
@@ -54,50 +97,52 @@ scannerRouter.post('/api/v1/scanner/sync', requireAuth, async (req: Request, res
   try {
     scan = await scanLibrary(scanRoot);
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Scan failed';
-    sendError(res, message, 500);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : 'Scan failed',
+    });
     return;
   }
 
+  const hub = hubClient();
   let added = 0;
-  let reused = 0;
-  const sourceErrors: string[] = [];
-  const ingested: Array<{ title: string; author: string; media_type: string; relative_path: string }> = [];
+  let updated = 0;
+  const errors: string[] = [];
 
   for (const book of scan.books) {
     try {
-      // file_path is stored relative to SCAN_PATH. The streaming endpoint
-      // resolves filesystem sources under SCAN_PATH (separate from
-      // LIBRARY_PATH which holds covers/uploads/gutenberg).
-      const filePathRelToScan = path.relative(scanBase, book.absolutePath);
+      const catalog = await ensureCatalog(book);
+      const filePath = path.relative(scanBase, book.absolutePath);
 
-      const { catalogBookId, wasReused } = await resolveCatalogBook(book, me, filePathRelToScan);
+      const { data: existing } = await hub
+        .from('library_server_books')
+        .select('id')
+        .eq('server_id', identity.serverId)
+        .eq('book_id', catalog.id)
+        .maybeSingle();
 
-      try {
-        await upsertOne(
-          'book_sources',
-          {
-            book_id: catalogBookId,
-            owner_id: me,
-            kind: 'filesystem',
-            media_type: book.mediaType,
-            file_path: filePathRelToScan,
-            tracks: book.tracks ? JSON.stringify(book.tracks) : null,
-            last_scanned_at: new Date().toISOString(),
-          },
-          { onConflict: 'book_id,owner_id,kind' }
-        );
-      } catch (sourceErr) {
-        const message = sourceErr instanceof Error ? sourceErr.message : 'Unknown error';
-        sourceErrors.push(`Failed to attach source for "${book.metadata.title}": ${message}`);
-        continue;
+      const payload = {
+        server_id: identity.serverId,
+        book_id: catalog.id,
+        file_path: filePath,
+        media_type: book.mediaType,
+        file_size_bytes: book.fileSize ?? null,
+        tracks: book.tracks ? book.tracks : null,
+        last_scanned_at: new Date().toISOString(),
+      };
+
+      if (existing) {
+        await hub.from('library_server_books').update(payload).eq('id', existing.id);
+        updated++;
+      } else {
+        await hub.from('library_server_books').insert(payload);
+        added++;
       }
 
-      // Cover: write a normalized 400px JPEG to <library>/covers/<book_id>.jpg
-      // and stamp catalog.cover_url. Best-effort; failures don't block ingest.
-      if (book.coverImage) {
-        const dest = path.join(coversDir, `${catalogBookId}.jpg`);
-        const targetUrl = `/api/v1/covers/${catalogBookId}`;
+      // Cover (best-effort): write a 400px JPEG to LIBRARY_PATH/covers/
+      // and stamp catalog.cover_url if not already set.
+      if (book.coverImage && !catalog.cover_url) {
+        const dest = path.join(coversDir, `${catalog.id}.jpg`);
         try {
           if (!fs.existsSync(dest)) {
             await sharp(book.coverImage)
@@ -105,82 +150,35 @@ scannerRouter.post('/api/v1/scanner/sync', requireAuth, async (req: Request, res
               .jpeg()
               .toFile(dest);
           }
-          await query(
-            'UPDATE books SET cover_url = $1 WHERE id = $2 AND cover_url IS NULL',
-            [targetUrl, catalogBookId]
-          );
+          // Cover URL points to this server — clients fetch via the
+          // covers route. Could later fall back to Open Library cover
+          // CDN for portability across servers.
+          await hub
+            .from('books')
+            .update({ cover_url: `/covers/${catalog.id}` })
+            .eq('id', catalog.id)
+            .is('cover_url', null);
         } catch {
-          // Best-effort; cover can be re-fetched on next scan.
+          // best-effort
         }
       }
-
-      if (add_to_library !== false) {
-        await upsertOne(
-          'user_books',
-          { user_id: me, book_id: catalogBookId, status: 'want' },
-          { onConflict: 'user_id,book_id', ignoreDuplicates: true }
-        );
-      }
-
-      if (wasReused) reused++; else added++;
-      ingested.push({
-        title: book.metadata.title,
-        author: book.metadata.authors[0] ?? 'Unknown',
-        media_type: book.mediaType,
-        relative_path: filePathRelToScan,
-      });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      sourceErrors.push(`Failed to process ${book.relativePath}: ${message}`);
+      errors.push(
+        `Failed to register "${book.metadata.title}": ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 
-  sendSuccess(res, {
-    scan_root: scan.rootPath,
-    found: scan.books.length,
-    added,
-    reused,
-    skipped: scan.skipped.length > 0 ? scan.skipped : undefined,
-    scan_errors: scan.errors.length > 0 ? scan.errors : undefined,
-    source_errors: sourceErrors.length > 0 ? sourceErrors : undefined,
-    books: ingested,
+  res.json({
+    success: true,
+    data: {
+      scan_root: scan.rootPath,
+      found: scan.books.length,
+      added,
+      updated,
+      skipped: scan.skipped.length > 0 ? scan.skipped : undefined,
+      scan_errors: scan.errors.length > 0 ? scan.errors : undefined,
+      errors: errors.length > 0 ? errors : undefined,
+    },
   });
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// Resolve (or create) a catalog book id for a scanned file. We dedup along
-// two axes:
-//   1. Same owner + filesystem source already pointing at this file_path:
-//      reuse the existing book row.
-//   2. Otherwise call ensureMinimalCatalogBook, which itself dedups by ISBN
-//      (via OpenLibrary import) or by (title, primary author).
-async function resolveCatalogBook(
-  book: ScannedBook,
-  ownerId: string,
-  filePathRelToScan: string
-): Promise<{ catalogBookId: string; wasReused: boolean }> {
-  const existingSource = await selectOne<{ book_id: string }>(
-    `SELECT book_id FROM book_sources
-      WHERE owner_id = $1 AND kind = 'filesystem' AND file_path = $2`,
-    [ownerId, filePathRelToScan]
-  );
-  if (existingSource) {
-    return { catalogBookId: existingSource.book_id, wasReused: true };
-  }
-
-  const catalog = await ensureMinimalCatalogBook({
-    title: book.metadata.title,
-    authors: book.metadata.authors,
-    subtitle: book.metadata.subtitle,
-    description: book.metadata.description,
-    publisher: book.metadata.publisher,
-    published_year: book.metadata.publishedYear,
-    genres: [],
-    language: book.metadata.language ?? 'en',
-    isbn: book.metadata.isbn,
-  });
-  return { catalogBookId: catalog.id, wasReused: false };
-}
