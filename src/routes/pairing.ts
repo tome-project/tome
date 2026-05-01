@@ -107,10 +107,15 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
       data: { paired: true, server_id: server.id, server_name: name, url },
     });
   } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: err instanceof Error ? err.message : 'Pairing failed',
-    });
+    // Surface the underlying error in logs + response while we're
+    // bringing up the federation flow.
+    console.error('[pair] failed', err);
+    let detail = 'Pairing failed';
+    if (err instanceof Error) detail = err.message;
+    else if (err && typeof err === 'object') {
+      try { detail = JSON.stringify(err); } catch { /* */ }
+    }
+    res.status(500).json({ success: false, error: detail });
   }
 });
 
