@@ -18,6 +18,8 @@ import {
 import { errorHandler } from './middleware';
 import { loadIdentity } from './services/server-identity';
 import { runScanForOwner } from './services/scan-on-startup';
+import { startHeartbeat } from './services/heartbeat';
+import { verifyIdentityOrUnpair } from './services/identity-check';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -70,17 +72,29 @@ app.listen(port, () => {
   console.log(`Tome library server running on port ${port}`);
   console.log(`Open http://localhost:${port}/setup to pair this server.`);
 
-  // Auto-scan on boot if already paired. Catches books added to disk
-  // since the last scan and surfaces them on the owner's shelf without
-  // requiring a manual hit to POST /scan. Runs in background — failures
-  // are logged but don't crash the server.
-  if (loadIdentity()) {
-    runScanForOwner().catch((err) => {
+  // Boot sequence (background — never blocks request handling):
+  //   1. Verify our persisted identity is still valid on the hub.
+  //      If the row is gone (admin wiped, owner removed), unpair.
+  //   2. If still paired, start the heartbeat ticker so the app shows
+  //      this server as online.
+  //   3. Kick off an auto-scan to catch any disk changes since last boot.
+  void (async () => {
+    if (!loadIdentity()) {
+      console.log('Server is not paired yet — skipping background tasks.');
+      return;
+    }
+    const stillPaired = await verifyIdentityOrUnpair();
+    if (!stillPaired) {
+      console.log('Identity check unpaired the server — visit /setup to re-pair.');
+      return;
+    }
+    startHeartbeat();
+    try {
+      await runScanForOwner();
+    } catch (err) {
       console.error('[startup-scan] failed', err);
-    });
-  } else {
-    console.log('Server is not paired yet — skipping startup scan.');
-  }
+    }
+  })();
 });
 
 export default app;

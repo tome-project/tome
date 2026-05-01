@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import os from 'os';
 import { hubClient, hubConfigured } from '../services/hub';
 import { saveIdentity, isPaired, loadIdentity } from '../services/server-identity';
+import { scanState } from '../services/scan-on-startup';
 
 export const pairingRouter = Router();
 
@@ -119,15 +120,31 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
   }
 });
 
-/// GET /pair/status — used by the wizard to poll for completion (or the
-/// app, for a real-time check before opening books from this server).
-pairingRouter.get('/pair/status', (req: Request, res: Response) => {
+/// GET /pair/status — used by the wizard to poll for completion AND by
+/// the app's library detail screen for live status: paired identity,
+/// scan progress, last summary, hosted book count.
+pairingRouter.get('/pair/status', async (req: Request, res: Response) => {
+  const identity = loadIdentity();
+  let bookCount: number | null = null;
+  if (identity) {
+    try {
+      const { count } = await hubClient()
+        .from('library_server_books')
+        .select('id', { count: 'exact', head: true })
+        .eq('server_id', identity.serverId);
+      bookCount = count ?? 0;
+    } catch {
+      // best-effort
+    }
+  }
   res.json({
     success: true,
     data: {
       hub_configured: hubConfigured(),
       paired: isPaired(),
-      identity: loadIdentity(),
+      identity,
+      book_count: bookCount,
+      scan: scanState(),
     },
   });
 });

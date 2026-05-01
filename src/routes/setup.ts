@@ -1,6 +1,9 @@
+import fs from 'fs';
+import path from 'path';
 import { Router, Request, Response } from 'express';
-import { hubConfigured } from '../services/hub';
+import { hubClient, hubConfigured } from '../services/hub';
 import { isPaired, loadIdentity } from '../services/server-identity';
+import { scanState, runScanForOwner } from '../services/scan-on-startup';
 
 export const setupRouter = Router();
 
@@ -54,6 +57,16 @@ function renderShell(title: string, body: string): string {
       background: rgba(120,120,120,0.12); padding: 2px 6px; border-radius: 4px; }
     pre { background: #f0ece4; padding: 14px; border-radius: 8px; overflow-x: auto; }
     @media (prefers-color-scheme: dark) { pre { background: #2a2a2e; } }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.danger, .card.danger button { background: #b32626; }
+    button.danger:hover, .card.danger button:hover { background: #931d1d; }
+    .card.danger { border-color: rgba(179, 38, 38, 0.35); }
+    .rowline { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+    .dim { color: #8b8b90; font-weight: 400; }
+    .pulse { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+    summary { cursor: pointer; padding: 4px 0; }
+    details[open] summary { margin-bottom: 8px; }
   </style>
 </head>
 <body>
@@ -98,19 +111,61 @@ function pairFormPage(): string {
   <p class="footnote">Prefer the CLI? <code>curl -X POST http://localhost:3000/pair -d 'code=123456&amp;name=Basement+NAS'</code></p>`);
 }
 
-function pairedPage(): string {
+async function pairedPage(): Promise<string> {
   const id = loadIdentity()!;
+  let bookCount: number | string = '—';
+  try {
+    const { count } = await hubClient()
+      .from('library_server_books')
+      .select('id', { count: 'exact', head: true })
+      .eq('server_id', id.serverId);
+    bookCount = count ?? 0;
+  } catch {
+    // best-effort
+  }
+  const scan = scanState();
+  const scanLine = scan.inProgress
+    ? `<span class="pulse">Scanning your library now…</span>`
+    : (scan.lastSummary
+        ? `Last scan ${new Date(scan.completedAt!).toLocaleString()} — `
+          + `<strong>${scan.lastSummary.found}</strong> found, `
+          + `<strong>${scan.lastSummary.added}</strong> added, `
+          + `<strong>${scan.lastSummary.updated}</strong> updated, `
+          + `<strong>${scan.lastSummary.pruned}</strong> removed`
+        : 'Not scanned yet.');
+  const libPath = process.env.LIBRARY_PATH || './library';
+
   return renderShell('Paired ✓', `
-  <p class="lede"><span class="ok">Paired.</span> This server is connected
-    to a Tome hub account.</p>
+  <p class="lede"><span class="ok">Paired.</span> This server is online and
+    connected to your Tome account.</p>
   <div class="card">
-    <p><strong>Library name:</strong> ${escapeHtml(id.serverName)}</p>
-    <p><strong>Owner:</strong> <code>${id.ownerId}</code></p>
-    <p><strong>Paired at:</strong> ${new Date(id.pairedAt).toLocaleString()}</p>
-    <p><strong>Server ID:</strong> <code>${id.serverId}</code></p>
+    <p class="rowline"><strong>${escapeHtml(id.serverName)}</strong>
+       <span class="dim">·</span> <span class="dim">${bookCount} book${bookCount === 1 ? '' : 's'}</span></p>
+    <p class="footnote">${scanLine}</p>
   </div>
-  <p class="footnote">To re-pair (e.g. you switched Tome accounts), delete
-    <code>$LIBRARY_PATH/.tome-server.json</code> and restart this server.</p>`);
+  <form class="card" method="POST" action="/setup/scan">
+    <p><strong>Scan now</strong></p>
+    <p class="footnote">Walks <code>${escapeHtml(libPath)}</code> for new
+      or removed books and reconciles your library on the hub. Safe to
+      run anytime; idempotent.</p>
+    <button type="submit" ${scan.inProgress ? 'disabled' : ''}>
+      ${scan.inProgress ? 'Scan in progress…' : 'Scan library now'}
+    </button>
+  </form>
+  <details class="card">
+    <summary><strong>Server details</strong></summary>
+    <p class="footnote"><strong>Owner user_id:</strong> <code>${id.ownerId}</code></p>
+    <p class="footnote"><strong>Server id:</strong> <code>${id.serverId}</code></p>
+    <p class="footnote"><strong>Paired at:</strong> ${new Date(id.pairedAt).toLocaleString()}</p>
+  </details>
+  <form class="card danger" method="POST" action="/setup/reset"
+        onsubmit="return confirm('Unpair this server? You\\'ll need a new code from the app to re-pair.');">
+    <p><strong>Re-pair this server</strong></p>
+    <p class="footnote">Disconnects from the current account so you can pair
+      it to a different one. Books on disk stay; the catalog rows in the
+      hub get orphaned (cleaned up on next scan from a new owner).</p>
+    <button type="submit" class="danger">Reset pairing</button>
+  </form>`);
 }
 
 function errorPage(message: string): string {
@@ -126,17 +181,52 @@ function escapeHtml(s: string): string {
   })[c]!);
 }
 
-setupRouter.get(['/', '/setup'], (_req: Request, res: Response) => {
+setupRouter.get(['/', '/setup'], async (_req: Request, res: Response) => {
   res.type('html');
   if (!hubConfigured()) {
     res.send(envMissingPage());
     return;
   }
   if (isPaired()) {
-    res.send(pairedPage());
+    res.send(await pairedPage());
     return;
   }
   res.send(pairFormPage());
+});
+
+/// POST /setup/scan — kicks off a manual scan from the wizard. Returns
+/// to /setup so the user can see live status updates.
+setupRouter.post('/setup/scan', async (_req: Request, res: Response) => {
+  res.type('html');
+  if (!isPaired()) {
+    res.redirect(303, '/setup');
+    return;
+  }
+  // Fire-and-forget; the wizard polls /setup for state.
+  void runScanForOwner().catch((err) => console.error('[wizard-scan]', err));
+  res.redirect(303, '/setup');
+});
+
+/// POST /setup/reset — unpair this server. Deletes .tome-server.json
+/// so the next /setup hit shows the pair-code form. The library_servers
+/// row in the hub stays; the owner can clean it up from the app's My
+/// Libraries screen.
+setupRouter.post('/setup/reset', async (_req: Request, res: Response) => {
+  res.type('html');
+  const libraryPath = process.env.LIBRARY_PATH || './library';
+  try {
+    fs.unlinkSync(path.join(libraryPath, '.tome-server.json'));
+  } catch {
+    // already gone
+  }
+  // Identity cache is module-level; we'd need to restart for it to
+  // re-read. Tell the operator.
+  res.send(renderShell('Pairing reset', `
+  <p class="lede">Pairing reset. <strong>Restart the server</strong>
+    (e.g. <code>docker compose restart server</code>) for the change
+    to take effect, then refresh this page to pair to a new account.</p>
+  <p class="footnote">Pre-existing books on disk stay; the heartbeat
+    + auto-scan stop firing for the old account.</p>`));
 });
 
 /// Web wizard form submit. Delegates to the same logic as the JSON /pair
