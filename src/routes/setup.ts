@@ -11,12 +11,16 @@ export const setupRouter = Router();
 ///   1. Hub not configured (env missing) → instructions to set env + restart.
 ///   2. Paired → status page (server name, owner, paired-at).
 ///   3. Otherwise → pair-code form. POSTs to /pair.
-function renderShell(title: string, body: string): string {
+function renderShell(title: string, body: string, refreshSeconds?: number): string {
+  const refreshTag = refreshSeconds
+    ? `<meta http-equiv="refresh" content="${refreshSeconds}" />`
+    : '';
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  ${refreshTag}
   <title>${title} — Tome library server</title>
   <style>
     :root { color-scheme: light dark; }
@@ -166,7 +170,11 @@ async function pairedPage(): Promise<string> {
       it to a different one. Books on disk stay; the catalog rows in the
       hub get orphaned (cleaned up on next scan from a new owner).</p>
     <button type="submit" class="danger">Reset pairing</button>
-  </form>`);
+  </form>`,
+  // Auto-refresh every 3s while scanning so the operator sees the
+  // status flip from "Scanning…" to the final summary without
+  // manually reloading. Off otherwise — no point thrashing the page.
+  scan.inProgress ? 3 : undefined);
 }
 
 function errorPage(message: string): string {
