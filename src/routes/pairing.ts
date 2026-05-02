@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
-import os from 'os';
 import { hubClient, hubConfigured } from '../services/hub';
 import { saveIdentity, isPaired, loadIdentity } from '../services/server-identity';
-import { scanState } from '../services/scan-on-startup';
+import { scanState, runScanForOwner } from '../services/scan-on-startup';
+import { startHeartbeat } from '../services/heartbeat';
 
 export const pairingRouter = Router();
 
@@ -50,7 +50,11 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
     return;
   }
 
-  const name = (body.name ?? '').trim() || `${os.hostname()}'s library`;
+  // Friendlier default than os.hostname() — inside a Docker container that
+  // returns the random container ID like "d4cc14759b7" which makes for an
+  // ugly library name. The user can rename via the My Libraries → detail
+  // screen later.
+  const name = (body.name ?? '').trim() || 'My Tome Library';
   const url = (body.publicUrl ?? '').trim() || detectSelfUrl(req);
 
   try {
@@ -101,6 +105,15 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
       ownerId: pairing.claimer_user_id,
       serverName: name,
       pairedAt: new Date().toISOString(),
+    });
+
+    // Kick off the heartbeat + first scan in the background so the
+    // owner's library populates without them having to find a "Scan
+    // now" button. Both are fire-and-forget — the response returns
+    // immediately so the wizard / app see "paired" right away.
+    startHeartbeat();
+    void runScanForOwner().catch((err) => {
+      console.error('[post-pair-scan]', err);
     });
 
     res.status(201).json({

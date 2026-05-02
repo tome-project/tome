@@ -23,20 +23,21 @@ function renderShell(title: string, body: string): string {
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       max-width: 520px; margin: 6vh auto 4vh; padding: 0 24px; line-height: 1.5;
-      color: #1c1c1e; background: #faf7f1;
+      color: #1a1a1d; background: #faf7f1;
     }
     @media (prefers-color-scheme: dark) {
       body { color: #f4f1ea; background: #1a1a1d; }
       .card { background: #232326; border-color: #34343a; }
       input { background: #1a1a1d; color: #f4f1ea; border-color: #444; }
-      .footnote { color: #999; }
+      label { color: #f4f1ea; }
+      p.lede, .footnote { color: #c8c8cc; }
     }
-    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.01em; }
+    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.01em; color: #1a1a1d; }
     h1 .brand { color: #c64a23; }
-    p.lede { color: #6b6b70; margin-top: 0; }
-    .card { border: 1px solid #e5e2db; border-radius: 14px; padding: 22px 22px 18px;
-      background: #fff; margin-top: 24px; }
-    label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; }
+    p.lede { color: #3a3a3f; margin-top: 0; }
+    .card { border: 1px solid #d8d4cb; border-radius: 14px; padding: 22px 22px 18px;
+      background: #fff; margin-top: 24px; color: #1a1a1d; }
+    label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; color: #1a1a1d; }
     input[type="text"] {
       width: 100%; padding: 10px 12px; font-size: 1rem; border: 1px solid #d4cfc6;
       border-radius: 8px; box-sizing: border-box;
@@ -258,7 +259,7 @@ setupRouter.post('/setup', async (req: Request, res: Response) => {
       ));
       return;
     }
-    res.send(pairedPage());
+    res.send(await pairedPage());
   } catch (err) {
     res.status(500).send(errorPage(err instanceof Error ? err.message : 'Pairing failed'));
   }
