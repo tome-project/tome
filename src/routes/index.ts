@@ -6,6 +6,7 @@ export { healthRouter } from './health';
 export { filesRouter } from './files';
 export { coversRouter } from './covers';
 export { scannerRouter } from './scanner';
+export { booksRouter } from './books';
 
 // v0.6 federation routes (new)
 export { pairingRouter } from './pairing';

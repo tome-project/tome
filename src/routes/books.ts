@@ -1,9 +1,8 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import { spawn } from 'child_process';
-import { requireAuth } from '../middleware/auth';
 import { requireSupabaseAuth } from '../middleware/supabase-auth';
-import { selectOne, selectMany } from '../services/db';
+import { selectMany } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
@@ -61,100 +60,13 @@ function ffprobeChapters(filePath: string): Promise<FfprobeChaptersOutput> {
 
 export const booksRouter = Router();
 
-// GET /api/v1/books/:id — hydrated book detail
-booksRouter.get('/api/v1/books/:id', requireAuth, async (req: Request, res: Response) => {
-  const me = req.userId!;
-  const id = String(req.params.id);
-  try {
-    const book = await selectOne('SELECT * FROM books WHERE id = $1', [id]);
-    if (!book) {
-      sendError(res, 'Book not found', 404);
-      return;
-    }
-    const [userBook, sources] = await Promise.all([
-      selectOne(
-        'SELECT * FROM user_books WHERE user_id = $1 AND book_id = $2',
-        [me, id]
-      ),
-      selectMany('SELECT * FROM book_sources WHERE book_id = $1', [id]),
-    ]);
-    sendSuccess(res, { book, user_book: userBook ?? null, sources });
-  } catch (err) {
-    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
-  }
-});
-
-interface CommunityRow {
-  user_id: string;
-  status: string;
-  rating: number | null;
-  review: string | null;
-  review_privacy: string | null;
-  privacy: string;
-  finished_at: string | null;
-}
-
-// GET /api/v1/books/:id/community — others' visible reviews/ratings
-booksRouter.get('/api/v1/books/:id/community', requireAuth, async (req: Request, res: Response) => {
-  const me = req.userId!;
-  const id = String(req.params.id);
-  try {
-    const rows = await selectMany<CommunityRow>(
-      `SELECT user_id, status, rating, review, review_privacy, privacy, finished_at
-         FROM user_books
-        WHERE book_id = $1 AND user_id <> $2`,
-      [id, me]
-    );
-    if (rows.length === 0) {
-      sendSuccess(res, { items: [] });
-      return;
-    }
-
-    const friendships = await selectMany<{ user_a_id: string; user_b_id: string }>(
-      `SELECT user_a_id, user_b_id FROM friendships
-        WHERE status = 'accepted' AND (user_a_id = $1 OR user_b_id = $1)`,
-      [me]
-    );
-    const inCircle = new Set<string>();
-    for (const f of friendships) inCircle.add(f.user_a_id === me ? f.user_b_id : f.user_a_id);
-
-    const visible = rows.filter((r) => {
-      if (r.privacy === 'public') return true;
-      if (r.privacy === 'circle') return inCircle.has(r.user_id);
-      return false;
-    });
-    if (visible.length === 0) {
-      sendSuccess(res, { items: [] });
-      return;
-    }
-
-    const visibleIds = [...new Set(visible.map((r) => r.user_id))];
-    const profiles = await selectMany<{
-      user_id: string;
-      handle: string;
-      display_name: string;
-      avatar_url: string | null;
-    }>(
-      `SELECT user_id, handle, display_name, avatar_url
-         FROM user_profiles WHERE user_id = ANY($1)`,
-      [visibleIds]
-    );
-    const profilesById = new Map(profiles.map((p) => [p.user_id, p]));
-
-    const items = visible.map((r) => ({
-      user_id: r.user_id,
-      status: r.status,
-      rating: r.rating,
-      review: r.review,
-      finished_at: r.finished_at,
-      in_circle: inCircle.has(r.user_id),
-      profile: profilesById.get(r.user_id) ?? null,
-    }));
-    sendSuccess(res, { items });
-  } catch (err) {
-    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
-  }
-});
+// Pre-v0.7 this file also exposed `/api/v1/books/:id` (book detail) and
+// `/api/v1/books/:id/community` (other people's reviews) — both routed
+// through the legacy local-auth JWT and the long-gone `book_sources`
+// table. Both endpoints have moved to direct Supabase queries from the
+// Flutter client (see lib/shared/providers/providers.dart →
+// bookDetailProvider, bookCommunityProvider). Removing them here so the
+// router doesn't advertise endpoints that 401 + 500 in production.
 
 // GET /api/v1/books/:id/chapters — audiobook chapter list. Two source
 // shapes feed the same response:
