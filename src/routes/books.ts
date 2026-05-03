@@ -77,9 +77,8 @@ export const booksRouter = Router();
 //      request time. ~50-200ms on a local file; cheap enough to skip a
 //      cache layer for v1.
 //
-// Pre-v0.7 this also queried a `media_servers` row to pull chapters from
-// Audiobookshelf, but the bridge is gone — federation is `library_servers`
-// + `library_server_grants` now, see migration 011.
+// Federation lookup is via `library_servers` + `library_collections` +
+// `library_server_grants` (per-collection grants since migration 003).
 booksRouter.get(
   '/api/v1/books/:id/chapters',
   requireSupabaseAuth,
@@ -90,8 +89,9 @@ booksRouter.get(
     try {
       // Pull every library_server_books row for this book that the caller
       // has access to: either they own the server, or they hold an active
-      // grant. Done with one query so we don't fan out per-server, and keyed
-      // through `library_servers` so we can prefer the caller's own copy.
+      // grant on the same collection that hosts the book. Done with one
+      // query so we don't fan out per-server, and keyed through
+      // `library_servers` so we can prefer the caller's own copy.
       const sources = await selectMany<{
         owner_id: string;
         media_type: string;
@@ -106,7 +106,7 @@ booksRouter.get(
               ls.owner_id = $2
               OR EXISTS (
                 SELECT 1 FROM library_server_grants g
-                WHERE g.server_id = ls.id
+                WHERE g.collection_id = lsb.collection_id
                   AND g.grantee_id = $2
                   AND g.revoked_at IS NULL
               )
