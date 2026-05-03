@@ -37,6 +37,11 @@ export interface ScannedBook {
   metadata: ScannedBookMetadata;
   coverImage: Buffer | null;
   tracks: AudiobookTrack[] | null; // null for single-file audiobooks and ebooks
+  // Top-level subdirectory of the library root that contains this book
+  // (e.g. "kids", "audiobooks/fantasy" → "audiobooks"). Empty string for
+  // files at the library root. Used by the caller to map books to
+  // library_collections rows — one collection per top-level subdir.
+  collectionRel: string;
 }
 
 export interface ScanResult {
@@ -44,6 +49,11 @@ export interface ScanResult {
   books: ScannedBook[];
   errors: Array<{ path: string; error: string }>;
   skipped: Array<{ path: string; reason: string }>;
+  // Distinct top-level subdirectories observed during the scan that contain
+  // at least one book file. The caller uses this to ensure a
+  // library_collections row exists for each. The empty string '' is
+  // included if any books live at the library root.
+  collectionRels: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +414,15 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
   const errors: Array<{ path: string; error: string }> = [];
   const skipped: Array<{ path: string; reason: string }> = [];
 
+  // Compute the top-level subdir of `root` that contains `relPath` (the
+  // path of a book or audiobook directory, relative to root). Returns ''
+  // when the book lives at the root (no enclosing subdir).
+  const collectionRelOf = (relPath: string): string => {
+    const norm = relPath.replace(/\\/g, '/');
+    const slash = norm.indexOf('/');
+    return slash === -1 ? '' : norm.slice(0, slash);
+  };
+
   for await (const item of walkBookFiles(root)) {
     if (item.kind === 'skip') {
       skipped.push({ path: path.relative(root, item.path), reason: item.reason });
@@ -417,8 +436,9 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           item.dirPath,
           item.trackPaths
         );
+        const relativePath = path.relative(root, item.dirPath);
         books.push({
-          relativePath: path.relative(root, item.dirPath),
+          relativePath,
           absolutePath: item.dirPath,
           mediaType: 'audiobook',
           fileSize: totalSize,
@@ -426,6 +446,7 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           metadata,
           coverImage,
           tracks,
+          collectionRel: collectionRelOf(relativePath),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
@@ -446,8 +467,9 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           ? await scanAudiobook(filePath)
           : await scanEpub(filePath);
 
+      const relativePath = path.relative(root, filePath);
       books.push({
-        relativePath: path.relative(root, filePath),
+        relativePath,
         absolutePath: filePath,
         mediaType,
         fileSize: fileStat.size,
@@ -455,6 +477,7 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
         metadata,
         coverImage,
         tracks: null,
+        collectionRel: collectionRelOf(relativePath),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -462,5 +485,9 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
     }
   }
 
-  return { rootPath: root, books, errors, skipped };
+  const collectionRels = Array.from(
+    new Set(books.map((b) => b.collectionRel)),
+  ).sort();
+
+  return { rootPath: root, books, errors, skipped, collectionRels };
 }

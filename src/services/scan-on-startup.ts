@@ -13,6 +13,48 @@ interface CatalogBook {
   cover_url: string | null;
 }
 
+/// Ensure a library_collections row exists for each top-level subdir
+/// observed in the scan. Returns a map: rel_path → collection_id, ready
+/// to stamp onto library_server_books rows during ingestion.
+///
+/// Collections are owner-scoped: the scanner discovers them from disk,
+/// so the owner doesn't have to manage them in the UI for the basic
+/// case. Renames are a UI concern — the scanner only sets the initial
+/// `name` (defaults to the directory basename, or "Unsorted" for the
+/// synthetic root collection).
+async function ensureCollections(
+  serverId: string,
+  collectionRels: string[],
+): Promise<Map<string, string>> {
+  const hub = hubClient();
+  const { data: existingRows } = await hub
+    .from('library_collections')
+    .select('id, rel_path')
+    .eq('server_id', serverId);
+  const existing = new Map<string, string>(
+    ((existingRows as Array<{ id: string; rel_path: string }>) ?? []).map(
+      (r) => [r.rel_path, r.id],
+    ),
+  );
+
+  for (const rel of collectionRels) {
+    if (existing.has(rel)) continue;
+    const name = rel === '' ? 'Unsorted' : rel;
+    const { data, error } = await hub
+      .from('library_collections')
+      .insert({ server_id: serverId, rel_path: rel, name })
+      .select('id, rel_path')
+      .single();
+    if (error) {
+      console.error(`[scan] failed to create collection rel="${rel}":`, error);
+      continue;
+    }
+    existing.set(data.rel_path, data.id);
+  }
+
+  return existing;
+}
+
 async function ensureCatalog(book: ScannedBook): Promise<CatalogBook> {
   const hub = hubClient();
   const isbn = book.metadata.isbn?.replace(/[-\s]/g, '');
@@ -115,6 +157,13 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
     let updated = 0;
     let errors = 0;
 
+    // Ensure a library_collections row for every top-level subdir we saw.
+    // The book ingest below stamps collection_id from this map.
+    const collectionByRel = await ensureCollections(
+      identity.serverId,
+      scan.collectionRels,
+    );
+
     // Bounded concurrency — too parallel and Supabase rate-limits us;
     // serial is too slow for a 200-book library.
     const WORKERS = 4;
@@ -126,6 +175,14 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
         const catalog = await ensureCatalog(book);
         seenBookIds.add(catalog.id);
         const filePath = path.relative(libraryPath, book.absolutePath);
+        const collectionId = collectionByRel.get(book.collectionRel);
+        if (!collectionId) {
+          console.error(
+            `[scan] no collection for rel="${book.collectionRel}" — skipping "${book.metadata.title}"`,
+          );
+          errors++;
+          return;
+        }
 
         const { data: existing } = await hub
           .from('library_server_books')
@@ -136,6 +193,7 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
 
         const payload = {
           server_id: identity.serverId,
+          collection_id: collectionId,
           book_id: catalog.id,
           file_path: filePath,
           media_type: book.mediaType,

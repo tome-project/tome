@@ -109,10 +109,43 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
   let updated = 0;
   const errors: string[] = [];
 
+  // Ensure a library_collections row exists for each top-level subdir we
+  // observed. Mirrors the auto-scan path in scan-on-startup.ts.
+  const { data: existingCollectionRows } = await hub
+    .from('library_collections')
+    .select('id, rel_path')
+    .eq('server_id', identity.serverId);
+  const collectionByRel = new Map<string, string>(
+    ((existingCollectionRows as Array<{ id: string; rel_path: string }>) ?? []).map(
+      (r) => [r.rel_path, r.id],
+    ),
+  );
+  for (const rel of scan.collectionRels) {
+    if (collectionByRel.has(rel)) continue;
+    const name = rel === '' ? 'Unsorted' : rel;
+    const { data, error } = await hub
+      .from('library_collections')
+      .insert({ server_id: identity.serverId, rel_path: rel, name })
+      .select('id, rel_path')
+      .single();
+    if (error) {
+      errors.push(`Failed to create collection "${rel}": ${error.message}`);
+      continue;
+    }
+    collectionByRel.set(data.rel_path, data.id);
+  }
+
   for (const book of scan.books) {
     try {
       const catalog = await ensureCatalog(book);
       const filePath = path.relative(scanBase, book.absolutePath);
+      const collectionId = collectionByRel.get(book.collectionRel);
+      if (!collectionId) {
+        errors.push(
+          `No collection for rel="${book.collectionRel}" on "${book.metadata.title}"`,
+        );
+        continue;
+      }
 
       const { data: existing } = await hub
         .from('library_server_books')
@@ -123,6 +156,7 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
 
       const payload = {
         server_id: identity.serverId,
+        collection_id: collectionId,
         book_id: catalog.id,
         file_path: filePath,
         media_type: book.mediaType,

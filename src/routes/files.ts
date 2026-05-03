@@ -19,6 +19,7 @@ interface Track {
 interface LibraryServerBook {
   id: string;
   server_id: string;
+  collection_id: string;
   book_id: string;
   file_path: string;
   media_type: 'epub' | 'audiobook';
@@ -83,6 +84,15 @@ filesRouter.get(
     }
     if (!row) {
       res.status(404).json({ success: false, error: 'Book not on this server' });
+      return;
+    }
+
+    // Per-collection access narrowing for non-owners. Owner has no
+    // grantedCollectionIds set (they see every collection); a grantee
+    // can only read books from collections they were granted.
+    const allowed = req.grantedCollectionIds;
+    if (allowed && !allowed.has(row.collection_id)) {
+      res.status(403).json({ success: false, error: 'Not in a shared collection' });
       return;
     }
 

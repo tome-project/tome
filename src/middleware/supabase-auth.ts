@@ -9,6 +9,13 @@ declare global {
     interface Request {
       /// auth.users.id of the caller, populated by [requireSupabaseAuth].
       supabaseUserId?: string;
+      /// Cached IDs of collections on this library server that the caller
+      /// has an active grant on. Populated by [requireLibraryAccess] for
+      /// non-owner callers; stays undefined for the owner (who can read
+      /// every collection). Downstream handlers narrow their lookups by
+      /// this set so a friend with kids-only access can't fetch a book
+      /// from the adult collection by ID.
+      grantedCollectionIds?: Set<string>;
     }
   }
 }
@@ -81,8 +88,14 @@ export function requireSupabaseAuth(
 }
 
 /// On top of `requireSupabaseAuth`, ensure the caller is the owner of
-/// this library server OR holds an active grant. Use on file-streaming
-/// + scan endpoints. 403 on no access.
+/// this library server OR holds at least one active per-collection
+/// grant. Use on file-streaming + scan endpoints. 403 on no access.
+///
+/// For non-owners, populates `req.grantedCollectionIds` with the
+/// collection IDs the caller can read. Downstream handlers must use
+/// this set when looking up books, otherwise a grantee with access to
+/// only one collection could fetch a book from another collection on
+/// the same server by guessing its ID.
 export async function requireLibraryAccess(
   req: Request,
   res: Response,
@@ -99,23 +112,25 @@ export async function requireLibraryAccess(
     return;
   }
   if (userId === identity.ownerId) {
+    // Owner: no per-collection narrowing — they see everything on this server.
     next();
     return;
   }
-  // Otherwise, require an active grant.
+  // Non-owner: pull every active grant on any collection of this server.
   try {
     const { data, error } = await hubClient()
       .from('library_server_grants')
-      .select('id')
-      .eq('server_id', identity.serverId)
+      .select('collection_id, library_collections!inner(server_id)')
       .eq('grantee_id', userId)
       .is('revoked_at', null)
-      .maybeSingle();
+      .eq('library_collections.server_id', identity.serverId);
     if (error) throw error;
-    if (!data) {
+    const rows = (data ?? []) as Array<{ collection_id: string }>;
+    if (rows.length === 0) {
       res.status(403).json({ success: false, error: 'No access to this library' });
       return;
     }
+    req.grantedCollectionIds = new Set(rows.map((r) => r.collection_id));
     next();
   } catch (err) {
     res.status(500).json({
