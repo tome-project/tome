@@ -2,9 +2,8 @@ import { Router, Request, Response } from 'express';
 import path from 'path';
 import { spawn } from 'child_process';
 import { requireAuth } from '../middleware/auth';
+import { requireSupabaseAuth } from '../middleware/supabase-auth';
 import { selectOne, selectMany } from '../services/db';
-import { decryptToken } from '../services/crypto';
-import { AudiobookshelfService } from '../services/audiobookshelf';
 import { sendSuccess, sendError } from '../utils';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
@@ -157,73 +156,63 @@ booksRouter.get('/api/v1/books/:id/community', requireAuth, async (req: Request,
   }
 });
 
-// GET /api/v1/books/:id/chapters — audiobook chapter list. Three source
+// GET /api/v1/books/:id/chapters — audiobook chapter list. Two source
 // shapes feed the same response:
-//   1. Audiobookshelf: pull chapters from the upstream item.
-//   2. Filesystem multi-track (folder of mp3s, one per chapter): synthesize
+//   1. Filesystem multi-track (folder of mp3s, one per chapter): synthesize
 //      from `tracks[]`, each track becomes one chapter with cumulative
 //      absolute start/end times.
-//   3. Filesystem single-file (m4b/m4a): run ffprobe -show_chapters at
+//   2. Filesystem single-file (m4b/m4a): run ffprobe -show_chapters at
 //      request time. ~50-200ms on a local file; cheap enough to skip a
 //      cache layer for v1.
-booksRouter.get('/api/v1/books/:id/chapters', requireAuth, async (req: Request, res: Response) => {
-  const me = req.userId!;
-  const bookId = String(req.params.id);
+//
+// Pre-v0.7 this also queried a `media_servers` row to pull chapters from
+// Audiobookshelf, but the bridge is gone — federation is `library_servers`
+// + `library_server_grants` now, see migration 011.
+booksRouter.get(
+  '/api/v1/books/:id/chapters',
+  requireSupabaseAuth,
+  async (req: Request, res: Response) => {
+    const me = req.supabaseUserId!;
+    const bookId = String(req.params.id);
 
-  try {
-    const sources = await selectMany<{
-      kind: string;
-      owner_id: string;
-      external_id: string | null;
-      media_server_id: string | null;
-      file_path: string | null;
-      tracks: SourceTrack[] | null;
-    }>('SELECT * FROM book_sources WHERE book_id = $1', [bookId]);
+    try {
+      // Pull every library_server_books row for this book that the caller
+      // has access to: either they own the server, or they hold an active
+      // grant. Done with one query so we don't fan out per-server, and keyed
+      // through `library_servers` so we can prefer the caller's own copy.
+      const sources = await selectMany<{
+        owner_id: string;
+        media_type: string;
+        file_path: string | null;
+        tracks: SourceTrack[] | null;
+      }>(
+        `SELECT ls.owner_id, lsb.media_type, lsb.file_path, lsb.tracks
+           FROM library_server_books lsb
+           JOIN library_servers ls ON ls.id = lsb.server_id
+          WHERE lsb.book_id = $1
+            AND (
+              ls.owner_id = $2
+              OR EXISTS (
+                SELECT 1 FROM library_server_grants g
+                WHERE g.server_id = ls.id
+                  AND g.grantee_id = $2
+                  AND g.revoked_at IS NULL
+              )
+            )`,
+        [bookId, me]
+      );
 
     if (sources.length === 0) {
       sendSuccess(res, { chapters: [] });
       return;
     }
 
-    // Prefer the caller's own source, else any accessible row (RLS already
-    // enforces visibility upstream of this route). Within that, prefer ABS
-    // > filesystem so books that exist in both can keep ABS chapter
-    // metadata if available.
+    // Prefer the caller's own copy, then fall through to a granted one.
     const accessible = [
       ...sources.filter((s) => s.owner_id === me),
       ...sources.filter((s) => s.owner_id !== me),
     ];
-    const abs = accessible.find((s) => s.kind === 'audiobookshelf');
-    const fs = accessible.find((s) => s.kind === 'filesystem');
-
-    // ── ABS path ──
-    if (abs && abs.media_server_id && abs.external_id) {
-      const server = await selectOne<{ url: string; token_encrypted: string }>(
-        'SELECT url, token_encrypted FROM media_servers WHERE id = $1',
-        [abs.media_server_id]
-      );
-      if (server) {
-        try {
-          const token = decryptToken(server.token_encrypted);
-          const absSvc = new AudiobookshelfService(server.url, token);
-          const item = await absSvc.getItemDetail(abs.external_id);
-          const raw = item?.media.chapters ?? [];
-          if (raw.length > 0) {
-            sendSuccess(res, {
-              chapters: raw.map((c, i) => ({
-                index: i,
-                start_ms: Math.round(c.start * 1000),
-                end_ms: Math.round(c.end * 1000),
-                title: c.title,
-              })),
-            });
-            return;
-          }
-        } catch {
-          // Fall through to the filesystem path if available.
-        }
-      }
-    }
+    const fs = accessible.find((s) => s.media_type === 'audiobook');
 
     // ── Filesystem multi-track ──
     if (fs && fs.tracks && fs.tracks.length > 0) {
@@ -276,7 +265,8 @@ booksRouter.get('/api/v1/books/:id/chapters', requireAuth, async (req: Request, 
     }
 
     sendSuccess(res, { chapters: [] });
-  } catch (err) {
-    sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
-  }
-});
+    } catch (err) {
+      sendError(res, err instanceof Error ? err.message : 'Query failed', 500);
+    }
+  },
+);
