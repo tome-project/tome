@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { hubClient } from './hub';
 import { loadIdentity } from './server-identity';
 import { scanLibrary, ScannedBook } from './scanner';
+import { lookupExternalCover } from './cover-lookup';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
 const coversDir = path.join(libraryPath, 'covers');
@@ -214,11 +215,36 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
           { onConflict: 'user_id,book_id', ignoreDuplicates: true },
         );
 
-        if (book.coverImage && !catalog.cover_url) {
+        // Local-first cover image: ID3 embedded art, folder cover.jpg,
+        // or EPUB cover (whatever the scanner could pull off disk).
+        // When the scanner came up empty AND the catalog has no
+        // cover_url yet, fall back to a network lookup against
+        // Open Library / Google Books. This is what gives mp3-rip
+        // libraries (no embedded art, no cover.jpg) real book covers
+        // — the host runs the fetch once, grantees see the result.
+        let coverBuffer: Buffer | null = book.coverImage;
+        if (!coverBuffer && !catalog.cover_url) {
+          try {
+            coverBuffer = await lookupExternalCover(
+              book.metadata.title,
+              book.metadata.authors,
+              book.metadata.isbn,
+            );
+            if (coverBuffer) {
+              console.log(
+                `[scan] external cover hit for "${book.metadata.title}" (${coverBuffer.length} bytes)`,
+              );
+            }
+          } catch (err) {
+            console.error(`[scan] cover lookup failed for "${book.metadata.title}":`, err);
+          }
+        }
+
+        if (coverBuffer && !catalog.cover_url) {
           const dest = path.join(coversDir, `${catalog.id}.jpg`);
           try {
             if (!fs.existsSync(dest)) {
-              await sharp(book.coverImage)
+              await sharp(coverBuffer)
                 .resize({ width: 400, withoutEnlargement: true })
                 .jpeg()
                 .toFile(dest);
