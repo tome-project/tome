@@ -540,6 +540,17 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
       out.title = dirNameAsTitle(dirBase, out.authors[0]);
     }
 
+    // Belt-and-suspenders: if the title still carries a "<Author> - "
+    // prefix (because dirNameAsTitle ran with the *bogus* author from
+    // ID3 before we replaced it with the path-derived author), strip
+    // it now.
+    if (out.authors.length > 0) {
+      const prefix = `${out.authors[0].trim()} - `;
+      if (out.title.toLowerCase().startsWith(prefix.toLowerCase())) {
+        out.title = out.title.slice(prefix.length).trim();
+      }
+    }
+
     return out;
   };
 
