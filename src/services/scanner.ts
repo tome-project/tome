@@ -224,6 +224,87 @@ function parseYear(raw: string | undefined): number | null {
   return match ? parseInt(match[0], 10) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Title / author cleanup heuristics
+// ---------------------------------------------------------------------------
+// Real-world rips are full of garbage metadata: album="1" (the disc number),
+// artist="12 The BFG" (some bad ripper's "track album-artist" template),
+// titles with "(Disc 1)" / "(retail)" / "(v1)" suffixes, filenames prefixed
+// with "01 ". The scanner used to adopt these verbatim; users saw books
+// titled "1" and authored by "12 The BFG". These helpers normalize before
+// we hand metadata to the catalog.
+
+const _PARENS_NOISE = /\s*\((?:disc|disk)\s*\d+\s*\)\s*$/i;
+const _RETAIL_NOISE = /\s*\((?:retail|v\d+|unabridged|abridged|audiobook)\)\s*$/i;
+const _LEADING_TRACK = /^\d{1,3}\s*[-.]?\s+/;
+
+function stripTitleNoise(raw: string): string {
+  let t = raw.trim();
+  // "(Disc 1)" / "(retail)" can stack — strip iteratively.
+  for (let i = 0; i < 4; i++) {
+    const before = t;
+    t = t.replace(_PARENS_NOISE, '').replace(_RETAIL_NOISE, '').trim();
+    if (t === before) break;
+  }
+  return t;
+}
+
+/// True when `raw` is the kind of "title" you only get from bogus ID3 data:
+/// pure number ("1"), a single letter, or empty after normalization.
+function isJunkTitle(raw: string | undefined): boolean {
+  if (!raw) return true;
+  const t = stripTitleNoise(raw);
+  if (t.length < 2) return true;
+  if (/^\d+$/.test(t)) return true;
+  return false;
+}
+
+/// Use a directory basename as a title when ID3/EPUB metadata is unusable.
+/// Strips a leading track number ("01 Foo" → "Foo"), an "Author Name - "
+/// prefix when we know the author, and parens-noise suffixes.
+function dirNameAsTitle(dirBase: string, knownAuthor?: string): string {
+  let t = dirBase.trim();
+  t = t.replace(_LEADING_TRACK, '').trim();
+  if (knownAuthor) {
+    const authorPrefix = `${knownAuthor.trim()} - `;
+    if (t.toLowerCase().startsWith(authorPrefix.toLowerCase())) {
+      t = t.slice(authorPrefix.length).trim();
+    }
+  }
+  t = stripTitleNoise(t);
+  return t || dirBase;
+}
+
+/// True when an author string is the kind of bogus value sloppy ripper
+/// templates produce — most commonly "<NN> <Book Title>" where the
+/// album-artist field got set to the disc number plus the book title.
+function isJunkAuthor(raw: string): boolean {
+  const t = raw.trim();
+  if (t.length === 0) return true;
+  if (/^\d+\s+\S/.test(t)) return true; // "12 The BFG"
+  return false;
+}
+
+/// Walk up from the book's path inside LIBRARY_PATH to guess the author.
+/// Layout convention: <collection>/<Author Name>/.../<Book>. When the path
+/// has at least 3 segments (collection + author + book), segment 1 is the
+/// author. Returns null if the path is shorter or the candidate looks
+/// nonsensical (filename, contains junk, etc.).
+function inferAuthorFromPath(relativePath: string): string | null {
+  const segs = relativePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((s) => s.length > 0);
+  if (segs.length < 3) return null;
+  const candidate = segs[1].trim();
+  // Reject "01 Diary..." style numbered-leaf folders that crept in.
+  if (_LEADING_TRACK.test(candidate)) return null;
+  // Reject anything ending in a file extension.
+  if (/\.[a-z0-9]{2,5}$/i.test(candidate)) return null;
+  if (candidate.length < 2) return null;
+  return candidate;
+}
+
 function audiobookMetadataFromTags(probe: FfprobeOutput): ScannedBookMetadata {
   const rawTags = probe.format?.tags ?? {};
   // ffprobe lowercases m4b atom tags but to be safe we normalize ourselves.
@@ -321,12 +402,15 @@ async function scanAudiobookMulti(
   const albumTag = firstProbe.format?.tags
     ? Object.entries(firstProbe.format.tags).find(([k]) => k.toLowerCase() === 'album')?.[1]
     : undefined;
-  if (albumTag && albumTag.trim().length > 0) {
-    metadata.title = albumTag.trim();
+  // Album tag is usually the book name on m4b/mp3 rips ("Stormlight 03 -
+  // Oathbringer"), but on plenty of real-world rips it's just the disc
+  // number ("1"). Fall back to the dir basename when the album is junk.
+  const dirBase = path.basename(dirPath);
+  const cleanedAlbum = albumTag ? stripTitleNoise(albumTag) : '';
+  if (!isJunkTitle(cleanedAlbum)) {
+    metadata.title = cleanedAlbum;
   } else {
-    // No album tag — fall back to the directory name, which is usually the
-    // book title in real libraries (e.g. "Stormlight 03 - Oathbringer").
-    metadata.title = path.basename(dirPath);
+    metadata.title = dirNameAsTitle(dirBase, metadata.authors[0]);
   }
 
   // Cover: prefer attached pic on track 0; fall back to folder cover.jpg/folder.jpg.
@@ -423,6 +507,42 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
     return slash === -1 ? '' : norm.slice(0, slash);
   };
 
+  // After ID3/EPUB extraction, run a final pass that uses the book's
+  // path inside LIBRARY_PATH to:
+  //   1. Replace junk authors ("12 The BFG", empty list) with the path's
+  //      author segment when the layout looks like <coll>/<Author>/...
+  //   2. Replace junk titles ("1", "(Disc 1)" remnants) with a cleaned
+  //      version of the book's directory/file basename.
+  //   3. Strip leading track-number prefixes from filename-derived titles
+  //      so "01 Diary of a Wimpy Kid (retail)" becomes "Diary of a Wimpy
+  //      Kid".
+  const polishMetadata = (
+    meta: ScannedBookMetadata,
+    relativePath: string,
+    isMultiTrackDir: boolean,
+    absolutePath: string,
+  ): ScannedBookMetadata => {
+    const out = { ...meta, authors: [...meta.authors] };
+
+    const pathAuthor = inferAuthorFromPath(relativePath);
+    if (out.authors.length === 0 && pathAuthor) {
+      out.authors = [pathAuthor];
+    } else if (out.authors.length > 0 && isJunkAuthor(out.authors[0]) && pathAuthor) {
+      out.authors[0] = pathAuthor;
+    }
+
+    // Title polish: strip noise universally, then fall back when junk.
+    out.title = stripTitleNoise(out.title);
+    if (isJunkTitle(out.title)) {
+      const dirBase = isMultiTrackDir
+        ? path.basename(absolutePath)
+        : path.basename(absolutePath, path.extname(absolutePath));
+      out.title = dirNameAsTitle(dirBase, out.authors[0]);
+    }
+
+    return out;
+  };
+
   for await (const item of walkBookFiles(root)) {
     if (item.kind === 'skip') {
       skipped.push({ path: path.relative(root, item.path), reason: item.reason });
@@ -437,13 +557,14 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           item.trackPaths
         );
         const relativePath = path.relative(root, item.dirPath);
+        const polished = polishMetadata(metadata, relativePath, true, item.dirPath);
         books.push({
           relativePath,
           absolutePath: item.dirPath,
           mediaType: 'audiobook',
           fileSize: totalSize,
           mtime: dirStat.mtime,
-          metadata,
+          metadata: polished,
           coverImage,
           tracks,
           collectionRel: collectionRelOf(relativePath),
@@ -468,13 +589,14 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           : await scanEpub(filePath);
 
       const relativePath = path.relative(root, filePath);
+      const polished = polishMetadata(metadata, relativePath, false, filePath);
       books.push({
         relativePath,
         absolutePath: filePath,
         mediaType,
         fileSize: fileStat.size,
         mtime: fileStat.mtime,
-        metadata,
+        metadata: polished,
         coverImage,
         tracks: null,
         collectionRel: collectionRelOf(relativePath),
