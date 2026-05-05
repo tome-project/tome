@@ -12,6 +12,7 @@ import {
   coversRouter,
   scannerRouter,
   booksRouter,
+  legalRouter,
   // v0.6 federation routes
   pairingRouter,
   setupRouter,
@@ -65,6 +66,7 @@ app.use(setupRouter);     // GET / and /setup → web wizard; POST /setup → cl
 app.use(pairingRouter);   // POST /pair (CLI alternative to the wizard)
 app.use(filesRouter);     // GET /files/:bookId → range-request file streaming
 app.use(coversRouter);    // GET /covers/:bookId → cover image
+app.use(legalRouter);     // GET /legal/{privacy,terms} → public legal pages
 app.use(scannerRouter);   // POST /scan → trigger a library scan (manual)
 app.use(booksRouter);     // GET /api/v1/books/:id/chapters → audiobook chapters
 

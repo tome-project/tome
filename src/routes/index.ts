@@ -7,6 +7,7 @@ export { filesRouter } from './files';
 export { coversRouter } from './covers';
 export { scannerRouter } from './scanner';
 export { booksRouter } from './books';
+export { legalRouter } from './legal';
 
 // v0.6 federation routes (new)
 export { pairingRouter } from './pairing';
