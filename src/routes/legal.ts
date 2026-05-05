@@ -172,6 +172,42 @@ const TERMS_BODY = `
 <p>Questions? Email <a href="mailto:legal@tome.arroyoautomation.com">legal@tome.arroyoautomation.com</a>.</p>
 `;
 
+const SUPPORT_BODY = `
+<h1>Tome support</h1>
+<p class="meta">Last updated: May 5, 2026</p>
+
+<p>Tome is a self-hosted reading platform for ebooks and audiobooks with optional book-club features. Need help?</p>
+
+<h2>Get in touch</h2>
+<ul>
+  <li><strong>General help &amp; bug reports:</strong> <a href="mailto:support@tome.arroyoautomation.com">support@tome.arroyoautomation.com</a></li>
+  <li><strong>Privacy questions or data requests:</strong> <a href="mailto:privacy@tome.arroyoautomation.com">privacy@tome.arroyoautomation.com</a></li>
+  <li><strong>DMCA / copyright complaints:</strong> <a href="mailto:dmca@tome.arroyoautomation.com">dmca@tome.arroyoautomation.com</a></li>
+  <li><strong>Security disclosures:</strong> <a href="mailto:security@tome.arroyoautomation.com">security@tome.arroyoautomation.com</a></li>
+</ul>
+<p>We aim to reply within 1–2 business days.</p>
+
+<h2>Common questions</h2>
+
+<h2>How do I add books?</h2>
+<p>Tome is self-hosted: you run a small server on a homelab box (Raspberry Pi, NAS, old Mac, anything always-on) and drop your <code>.epub</code> and <code>.m4b</code>/<code>.mp3</code> files into a folder. The server scans the folder, fetches cover art, and serves the files to your phone or tablet over your account. The mobile app does not download or distribute commercial books on your behalf.</p>
+
+<h2>What about Project Gutenberg?</h2>
+<p>Tome includes a built-in browser for <a href="https://www.gutenberg.org">Project Gutenberg</a>, the public-domain library. You can browse, search, and download free public-domain titles directly into your library from inside the app.</p>
+
+<h2>How do I share my library with friends?</h2>
+<p>From <em>Profile → My Libraries → (your library) → Share with friend</em>, pick which collections you want to share and choose a friend. They can read what you’ve shared from the same app, but cannot copy or download the files.</p>
+
+<h2>How do I delete my account?</h2>
+<p>Inside the app: <em>Profile → About &amp; legal → Delete account</em>. The deletion is immediate and irreversible — your profile, shelves, progress, highlights, clubs, libraries, and any sharing grants are removed.</p>
+
+<h2>Is Tome free? Open source?</h2>
+<p>The mobile app is free. The server is <a href="https://github.com/tome-project/tome">open source</a> under AGPL-3.0. There are no in-app purchases.</p>
+
+<hr>
+<p><a href="/legal/privacy">Privacy Policy</a> · <a href="/legal/terms">Terms of Service</a></p>
+`;
+
 legalRouter.get('/legal', (_req, res) => res.redirect(302, '/legal/privacy'));
 legalRouter.get('/legal/privacy', (_req, res) => {
   res.set('Cache-Control', 'public, max-age=3600');
@@ -180,4 +216,8 @@ legalRouter.get('/legal/privacy', (_req, res) => {
 legalRouter.get('/legal/terms', (_req, res) => {
   res.set('Cache-Control', 'public, max-age=3600');
   res.type('html').send(layout('Terms of Service', TERMS_BODY));
+});
+legalRouter.get('/support', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.type('html').send(layout('Support', SUPPORT_BODY));
 });
