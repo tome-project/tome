@@ -80,11 +80,17 @@ app.use(errorHandler);
 
 app.listen(port, () => {
   console.log(`Tome library server running on port ${port}`);
-  console.log(
-    isHubMode()
-      ? `[mode] hub — mints service users for remote library servers`
-      : `[mode] self-host — pairs through hub at ${process.env.HUB_URL || 'https://tome.arroyoautomation.com'}`,
-  );
+  if (isHubMode()) {
+    console.log(
+      '[mode] hub — mints service users for remote library servers ' +
+        `(IS_HUB=${process.env.IS_HUB ?? 'unset'}, ` +
+        `service_role=${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'present' : 'absent'})`,
+    );
+  } else {
+    console.log(
+      `[mode] self-host — pairs through hub at ${process.env.HUB_URL || 'https://tome.arroyoautomation.com'}`,
+    );
+  }
   console.log(`Open http://localhost:${port}/setup to pair this server.`);
 
   // Boot sequence (background — never blocks request handling):
