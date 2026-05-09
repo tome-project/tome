@@ -16,12 +16,15 @@ import {
   // v0.6 federation routes
   pairingRouter,
   setupRouter,
+  // v0.7 hub-mode routes
+  hubRouter,
 } from './routes';
 import { errorHandler } from './middleware';
 import { loadIdentity } from './services/server-identity';
 import { runScanForOwner } from './services/scan-on-startup';
 import { startHeartbeat } from './services/heartbeat';
 import { verifyIdentityOrUnpair } from './services/identity-check';
+import { initHubClient, isHubMode, hubConfigured } from './services/hub';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -64,6 +67,9 @@ app.use(limiter);
 app.use(healthRouter);
 app.use(setupRouter);     // GET / and /setup → web wizard; POST /setup → claim
 app.use(pairingRouter);   // POST /pair (CLI alternative to the wizard)
+if (isHubMode()) {
+  app.use(hubRouter);     // POST /api/v1/hub/pair → mint scoped service users for remote library servers
+}
 app.use(filesRouter);     // GET /files/:bookId → range-request file streaming
 app.use(coversRouter);    // GET /covers/:bookId → cover image
 app.use(legalRouter);     // GET /legal/{privacy,terms} → public legal pages
@@ -74,15 +80,36 @@ app.use(errorHandler);
 
 app.listen(port, () => {
   console.log(`Tome library server running on port ${port}`);
+  console.log(
+    isHubMode()
+      ? `[mode] hub — mints service users for remote library servers`
+      : `[mode] self-host — pairs through hub at ${process.env.HUB_URL || 'https://tome.arroyoautomation.com'}`,
+  );
   console.log(`Open http://localhost:${port}/setup to pair this server.`);
 
   // Boot sequence (background — never blocks request handling):
+  //   0. Initialize the Supabase client. Hub mode: service-role.
+  //      Self-host mode: sign in as our scoped service user. Skipped
+  //      if we're not paired yet (the wizard will handle that).
   //   1. Verify our persisted identity is still valid on the hub.
   //      If the row is gone (admin wiped, owner removed), unpair.
   //   2. If still paired, start the heartbeat ticker so the app shows
   //      this server as online.
   //   3. Kick off an auto-scan to catch any disk changes since last boot.
   void (async () => {
+    if (!hubConfigured()) {
+      console.log('Server is not paired yet — visit /setup to pair.');
+      return;
+    }
+    try {
+      await initHubClient();
+    } catch (err) {
+      console.error(
+        '[boot] failed to initialize Supabase session:',
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
     if (!loadIdentity()) {
       console.log('Server is not paired yet — skipping background tasks.');
       return;

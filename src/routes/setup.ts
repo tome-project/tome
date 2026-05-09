@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Router, Request, Response } from 'express';
-import { hubClient, hubConfigured } from '../services/hub';
+import { hubClient, hubConfigured, isHubMode, hubBaseUrl } from '../services/hub';
 import { isPaired, loadIdentity } from '../services/server-identity';
 import { scanState, runScanForOwner } from '../services/scan-on-startup';
 
@@ -82,16 +82,23 @@ function renderShell(title: string, body: string, refreshSeconds?: number): stri
 }
 
 function envMissingPage(): string {
+  // Self-hosters don't need to configure Supabase any more — the hub
+  // handles credential issuance via /api/v1/hub/pair. The only env
+  // variable they need is LIBRARY_PATH (where their books live). If
+  // we hit this branch the operator is running an explicitly broken
+  // hub-mode build, so the message stays focused on operators.
   return renderShell('Setup needed', `
-  <p class="lede">This server isn't connected to a Tome hub yet. Set two
-    environment variables and restart:</p>
+  <p class="lede">This server is configured as a hub but is missing
+    Supabase credentials. Self-hosters should remove
+    <code>IS_HUB=true</code> and restart — pairing will then go through
+    the public hub at <code>${escapeHtml(hubBaseUrl())}</code>.</p>
   <div class="card">
     <pre>SUPABASE_URL=https://&lt;your-project&gt;.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=&lt;your service role key&gt;
-LIBRARY_PATH=/path/to/your/books</pre>
-    <p class="footnote">In docker-compose, add these to the <code>environment:</code> block.
-      The service role key is at Supabase project → Settings → API. It's
-      powerful — keep it on this server only.</p>
+SUPABASE_SERVICE_ROLE_KEY=&lt;your service role key&gt;</pre>
+    <p class="footnote">If you really intend to run your own hub, set
+      these two env vars and restart. The service role key is at
+      Supabase project → Settings → API. It's powerful — keep it on
+      this server only.</p>
   </div>`);
 }
 
@@ -192,7 +199,10 @@ function escapeHtml(s: string): string {
 
 setupRouter.get(['/', '/setup'], async (_req: Request, res: Response) => {
   res.type('html');
-  if (!hubConfigured()) {
+  // Hub mode without Supabase env vars is misconfigured — show the
+  // operator help. Self-hosters never hit this branch (isHubMode()
+  // returns false for them) and go straight to the pair form.
+  if (isHubMode() && !hubConfigured()) {
     res.send(envMissingPage());
     return;
   }

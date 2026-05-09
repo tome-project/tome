@@ -16,6 +16,15 @@ export interface ServerIdentity {
   ownerId: string;         // auth.users.id of the binder
   serverName: string;      // user-chosen display name
   pairedAt: string;        // ISO timestamp
+
+  // Self-host mode: this server's own Supabase service user. The
+  // server signs into Supabase as this user; RLS policies on
+  // library_server_books / library_collections / library_servers scope
+  // its writes to its own rows. Absent on legacy (pre-007) prod
+  // pairings, where the server uses SUPABASE_SERVICE_ROLE_KEY.
+  supabaseUrl?: string;
+  supabaseEmail?: string;
+  supabasePassword?: string;
 }
 
 let _cached: ServerIdentity | null | undefined;

@@ -13,6 +13,12 @@ export { legalRouter } from './legal';
 export { pairingRouter } from './pairing';
 export { setupRouter } from './setup';
 
+// v0.7 hub-mode routes — only mounted when IS_HUB=true (or the prod
+// server which has SUPABASE_SERVICE_ROLE_KEY). Allows remote library
+// servers to claim a pairing code and receive a scoped Supabase service
+// user instead of needing their own service-role key.
+export { hubRouter } from './hub';
+
 // Gutenberg moved off the library server in v0.6. The Flutter app talks
 // directly to gutendex.com for catalog browse + downloads the epub from
 // gutenberg.org to the device, registering it via the standard

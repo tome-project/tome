@@ -35,24 +35,56 @@ Tome is what happens when a single product owns the whole stack:
 
 ## Quick start
 
+You don't need a database, an auth provider, or any cloud account. The Tome iOS/Android app handles your account; this server just streams your books.
+
 ```bash
 docker run -d \
   --name tome \
   -p 3000:3000 \
-  -v /path/to/your/books:/scan:ro \
-  -v tome-data:/library \
-  -e SCAN_PATH=/scan \
-  -e LIBRARY_PATH=/library \
-  -e SUPABASE_URL=... \
-  -e SUPABASE_ANON_KEY=... \
-  -e SUPABASE_SERVICE_ROLE_KEY=... \
-  -e ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  -v /path/to/your/books:/library \
   ghcr.io/tome-project/tome:latest
 ```
 
-Then install the [Tome app](https://github.com/tome-project/tome-app) on your phone, sign up, and POST to `/api/v1/scanner/sync` (or use the in-app "Scan now" button) to ingest your library.
+Then:
 
-> **Note:** Tome currently requires a Supabase project for auth and metadata storage. Self-hosted Postgres + local auth is on the roadmap and tracks alongside the v1.0 release.
+1. Install the [Tome app](https://apps.apple.com/app/tome) and sign in.
+2. In the app: **Profile → Libraries → Connect a library server → Generate code**.
+3. In a browser visit `http://<your-server>:3000/setup` and paste the 6-digit code.
+
+The server pairs to your account, scans `/library` in the background, and books appear in the app within a minute. Friends you share the library with get the same files streamed from your hardware — no second install on their end.
+
+### How pairing works
+
+The Tome hub at `tome.arroyoautomation.com` mints a per-server credential at pair time. Your server stores it in `<library>/.tome-server.json` and uses it to sign in to the catalog. RLS policies in the hub Supabase scope every write to *your* server's rows, so a paired server can never read or modify another user's data — even though everyone shares the same hub.
+
+You don't manage Supabase, you don't manage tokens, and you don't see a service-role key.
+
+### Configuration
+
+The only thing you usually set is the volume.
+
+| Env var | Required | Default | Description |
+|---|---|---|---|
+| `LIBRARY_PATH` | yes | `/library` | Where your books live inside the container. Mount your real library here. |
+| `PUBLIC_URL` | recommended (remote) | (request host) | Public URL the app uses to reach this server. Set this if you're behind Cloudflare Tunnel / Tailscale. |
+| `HUB_URL` | no | `https://tome.arroyoautomation.com` | Override only if you're running your own hub. |
+| `PORT` | no | `3000` | HTTP port. |
+| `CORS_ORIGIN` | no | `*` | Origin allowlist for cross-origin requests. |
+
+### Re-pairing
+
+Pop the identity file and restart:
+
+```bash
+docker compose exec server rm /library/.tome-server.json
+docker compose restart server
+```
+
+Then visit `/setup` again with a fresh code.
+
+### Running your own hub (advanced)
+
+If you want a fully independent stack with your own user accounts, run the server with `IS_HUB=true` plus `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` of your own Supabase project. Most users won't want this — the public hub already exists, costs you nothing, and gives you the social/clubs/discussion features for free.
 
 ## Library layout
 
@@ -73,19 +105,6 @@ The scanner walks any structure under `SCAN_PATH` and identifies books by file e
 ```
 
 Existing Audiobookshelf users can point Tome at the same directory tree without reorganizing.
-
-## Configuration
-
-| Env var | Required | Default | Description |
-|---|---|---|---|
-| `SCAN_PATH` | recommended | `LIBRARY_PATH` | Read-only mount of your audiobook + ebook library |
-| `LIBRARY_PATH` | recommended | `./library` | Writable directory for covers, uploads, Gutenberg downloads |
-| `PORT` | no | `3000` | HTTP port |
-| `SUPABASE_URL` | yes | — | Supabase project URL |
-| `SUPABASE_ANON_KEY` | yes | — | Public anon key |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | — | Service role key (admin DB access) |
-| `ENCRYPTION_KEY` | yes | — | 32-byte hex string for encrypting media-server tokens at rest |
-| `CORS_ORIGIN` | no | `*` | Origin allowlist for cross-origin requests |
 
 ## Architecture
 
