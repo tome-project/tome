@@ -13,6 +13,7 @@ import {
   scannerRouter,
   booksRouter,
   legalRouter,
+  requestsRouter,
   // v0.6 federation routes
   pairingRouter,
   setupRouter,
@@ -74,7 +75,8 @@ app.use(filesRouter);     // GET /files/:bookId → range-request file streaming
 app.use(coversRouter);    // GET /covers/:bookId → cover image
 app.use(legalRouter);     // GET /legal/{privacy,terms} → public legal pages
 app.use(scannerRouter);   // POST /scan → trigger a library scan (manual)
-app.use(booksRouter);     // GET /api/v1/books/:id/chapters → audiobook chapters
+app.use(booksRouter);     // GET /api/v1/books/:id/chapters
+app.use(requestsRouter);  // GET /api/v1/books/:id/next-in-series → series-aware "what's next" → audiobook chapters
 
 app.use(errorHandler);
 

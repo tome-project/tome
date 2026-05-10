@@ -5,6 +5,7 @@ import { hubClient } from './hub';
 import { loadIdentity } from './server-identity';
 import { scanLibrary, ScannedBook } from './scanner';
 import { lookupExternalCover } from './cover-lookup';
+import { autoFulfillRequests } from './auto-fulfill';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
 const coversDir = path.join(libraryPath, 'covers');
@@ -208,6 +209,15 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
         } else {
           await hub.from('library_server_books').insert(payload);
           added++;
+          // New server-book row — flip any matching pending book_requests
+          // to fulfilled. Match key is isbn_13.
+          const cleanIsbn = book.metadata.isbn?.replace(/[-\s]/g, '');
+          const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
+          await autoFulfillRequests({
+            serverId: identity.serverId,
+            catalogBookId: catalog.id,
+            isbn13,
+          });
         }
 
         await hub.from('user_books').upsert(

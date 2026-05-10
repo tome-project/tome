@@ -6,6 +6,7 @@ import { requireSupabaseAuth } from '../middleware/supabase-auth';
 import { hubClient } from '../services/hub';
 import { loadIdentity } from '../services/server-identity';
 import { scanLibrary, ScannedBook } from '../services/scanner';
+import { autoFulfillRequests } from '../services/auto-fulfill';
 
 export const scannerRouter = Router();
 
@@ -171,6 +172,13 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
       } else {
         await hub.from('library_server_books').insert(payload);
         added++;
+        const cleanIsbn = book.metadata.isbn?.replace(/[-\s]/g, '');
+        const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
+        await autoFulfillRequests({
+          serverId: identity.serverId,
+          catalogBookId: catalog.id,
+          isbn13,
+        });
       }
 
       // Also add the book to the owner's shelf so it shows up in their
