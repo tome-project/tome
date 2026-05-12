@@ -87,13 +87,25 @@ filesRouter.get(
       return;
     }
 
-    // Per-collection access narrowing for non-owners. Owner has no
-    // grantedCollectionIds set (they see every collection); a grantee
-    // can only read books from collections they were granted.
-    const allowed = req.grantedCollectionIds;
-    if (allowed && !allowed.has(row.collection_id)) {
-      res.status(403).json({ success: false, error: 'Not in a shared collection' });
-      return;
+    // Per-book access narrowing for non-owners. Owner has both grant
+    // sets undefined (they see every collection on every book); a
+    // non-owner passes if EITHER source covers the request:
+    //   - the book's collection is in their granted collection set, OR
+    //   - the bookId is in their active club-grant set (lent by a
+    //     club host for the club's duration).
+    // Club grants are intentionally per-book, so a member of a kids'-
+    // book club can't ride the grant to read other books in the host's
+    // adult collection.
+    const allowedCollections = req.grantedCollectionIds;
+    const allowedClubBooks = req.grantedClubBookIds;
+    const isOwner = allowedCollections === undefined && allowedClubBooks === undefined;
+    if (!isOwner) {
+      const viaCollection = allowedCollections?.has(row.collection_id) ?? false;
+      const viaClub = allowedClubBooks?.has(bookId) ?? false;
+      if (!viaCollection && !viaClub) {
+        res.status(403).json({ success: false, error: 'No access to this book' });
+        return;
+      }
     }
 
     // Multi-track audiobooks: row.file_path is the directory, row.tracks

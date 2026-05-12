@@ -16,6 +16,15 @@ declare global {
       /// this set so a friend with kids-only access can't fetch a book
       /// from the adult collection by ID.
       grantedCollectionIds?: Set<string>;
+      /// Cached book IDs the caller has access to via an active
+      /// club_book_access grant (i.e. they're a member of a book club
+      /// whose pick is that book). Populated by [requireLibraryAccess]
+      /// for non-owner callers alongside grantedCollectionIds. Downstream
+      /// handlers should allow the request if EITHER set covers it —
+      /// club access is per-book and intentionally narrower than a
+      /// collection grant, so it can't be used to fetch other books in
+      /// the same collection.
+      grantedClubBookIds?: Set<string>;
     }
   }
 }
@@ -116,21 +125,65 @@ export async function requireLibraryAccess(
     next();
     return;
   }
-  // Non-owner: pull every active grant on any collection of this server.
+  // Non-owner: pull two independent sources of access in parallel —
+  //   1. Collection grants (the v0.6 library-share model: owner shared
+  //      a whole collection like kids/ or adult/ with this user).
+  //   2. Club book grants (this user is a member of a book club whose
+  //      pick is on this server). Narrower; per-book, time-bounded.
+  // Both run in one round trip via Promise.all. If neither returns any
+  // rows, the user has no business reading this server's files.
   try {
-    const { data, error } = await hubClient()
-      .from('library_server_grants')
-      .select('collection_id, library_collections!inner(server_id)')
-      .eq('grantee_id', userId)
-      .is('revoked_at', null)
-      .eq('library_collections.server_id', identity.serverId);
-    if (error) throw error;
-    const rows = (data ?? []) as Array<{ collection_id: string }>;
-    if (rows.length === 0) {
+    const [collectionsResult, clubGrantsResult] = await Promise.all([
+      hubClient()
+        .from('library_server_grants')
+        .select('collection_id, library_collections!inner(server_id)')
+        .eq('grantee_id', userId)
+        .is('revoked_at', null)
+        .eq('library_collections.server_id', identity.serverId),
+      // Active club grants for this user. We don't filter by server here
+      // because the join would be expensive and ambiguous in PostgREST;
+      // instead we fetch all of the user's active club grants (typically
+      // a handful) and let the file handler's library_server_books
+      // lookup do the per-server narrowing — it already does that today
+      // by querying with `server_id = identity.serverId`.
+      hubClient()
+        .from('club_book_access')
+        .select('book_id, clubs!inner(end_date)')
+        .eq('user_id', userId)
+        .is('revoked_at', null),
+    ]);
+    if (collectionsResult.error) throw collectionsResult.error;
+    if (clubGrantsResult.error) throw clubGrantsResult.error;
+
+    const collectionRows = (collectionsResult.data ?? []) as Array<{
+      collection_id: string;
+    }>;
+    // PostgREST returns embedded relations as arrays even when the
+    // join is single-row (the type system can't always tell a !inner
+    // FK is unique), so normalize both shapes here.
+    const clubRows = (clubGrantsResult.data ?? []) as unknown as Array<{
+      book_id: string;
+      clubs: { end_date: string | null } | { end_date: string | null }[] | null;
+    }>;
+
+    // Filter out club grants whose parent club has already ended. We do
+    // this in JS rather than SQL so we don't pay for a NOW()-vs-timestamp
+    // predicate on PostgREST; the row set is tiny.
+    const nowMs = Date.now();
+    const activeClubBookIds = clubRows
+      .filter((r) => {
+        const club = Array.isArray(r.clubs) ? r.clubs[0] : r.clubs;
+        const end = club?.end_date;
+        return !end || Date.parse(end) > nowMs;
+      })
+      .map((r) => r.book_id);
+
+    if (collectionRows.length === 0 && activeClubBookIds.length === 0) {
       res.status(403).json({ success: false, error: 'No access to this library' });
       return;
     }
-    req.grantedCollectionIds = new Set(rows.map((r) => r.collection_id));
+    req.grantedCollectionIds = new Set(collectionRows.map((r) => r.collection_id));
+    req.grantedClubBookIds = new Set(activeClubBookIds);
     next();
   } catch (err) {
     res.status(500).json({

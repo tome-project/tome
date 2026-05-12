@@ -110,6 +110,14 @@ booksRouter.get(
                   AND g.grantee_id = $2
                   AND g.revoked_at IS NULL
               )
+              OR EXISTS (
+                SELECT 1 FROM club_book_access cba
+                JOIN clubs c ON c.id = cba.club_id
+                WHERE cba.user_id = $2
+                  AND cba.book_id = lsb.book_id
+                  AND cba.revoked_at IS NULL
+                  AND (c.end_date IS NULL OR c.end_date > now())
+              )
             )`,
         [bookId, me]
       );
