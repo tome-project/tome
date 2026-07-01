@@ -62,7 +62,7 @@ ${body}
 
 const PRIVACY_BODY = `
 <h1>Privacy Policy</h1>
-<p class="meta">Last updated: May 4, 2026 · <a href="mailto:privacy@tome.arroyoautomation.com">privacy@tome.arroyoautomation.com</a></p>
+<p class="meta">Last updated: May 4, 2026 · <a href="mailto:privacy@tome.chrisarroyo.dev">privacy@tome.chrisarroyo.dev</a></p>
 
 <p>Tome (<em>“the app”</em>) is a self-hosted reading platform for ebooks and audiobooks with optional book-club features. This policy explains what data the app collects, why, and what you can do about it.</p>
 
@@ -102,7 +102,7 @@ const PRIVACY_BODY = `
 <ul>
   <li><strong>Access &amp; correction:</strong> you can edit your profile, handle, avatar, and privacy settings inside the app at any time.</li>
   <li><strong>Deletion:</strong> from <em>Profile → Settings → Delete account</em> you can permanently delete your account and all of its associated data. Deletion is immediate and irreversible.</li>
-  <li><strong>Export:</strong> email <a href="mailto:privacy@tome.arroyoautomation.com">privacy@tome.arroyoautomation.com</a> and we’ll send you a JSON export of your account data within 30 days.</li>
+  <li><strong>Export:</strong> email <a href="mailto:privacy@tome.chrisarroyo.dev">privacy@tome.chrisarroyo.dev</a> and we’ll send you a JSON export of your account data within 30 days.</li>
 </ul>
 
 <h2>Children</h2>
@@ -115,12 +115,12 @@ const PRIVACY_BODY = `
 <p>If we make material changes to this policy we’ll update the <em>Last updated</em> date at the top and, where appropriate, notify you in the app. Continuing to use Tome after a change means you accept the revised policy.</p>
 
 <h2>Contact</h2>
-<p>Questions? Email <a href="mailto:privacy@tome.arroyoautomation.com">privacy@tome.arroyoautomation.com</a>.</p>
+<p>Questions? Email <a href="mailto:privacy@tome.chrisarroyo.dev">privacy@tome.chrisarroyo.dev</a>.</p>
 `;
 
 const TERMS_BODY = `
 <h1>Terms of Service</h1>
-<p class="meta">Last updated: May 4, 2026 · <a href="mailto:legal@tome.arroyoautomation.com">legal@tome.arroyoautomation.com</a></p>
+<p class="meta">Last updated: May 4, 2026 · <a href="mailto:legal@tome.chrisarroyo.dev">legal@tome.chrisarroyo.dev</a></p>
 
 <p>These Terms govern your use of the Tome mobile application and related services (<em>“Tome”</em>, <em>“the Service”</em>). By creating an account, signing in, or otherwise using the Service, you agree to these Terms. If you don’t agree, don’t use the Service.</p>
 
@@ -142,7 +142,7 @@ const TERMS_BODY = `
   <li>Use the Service to harass, threaten, defame, or impersonate another person.</li>
   <li>Post sexually explicit content involving minors, or any content that is otherwise illegal where you live.</li>
   <li>Attempt to access another user’s account, library, or library server without permission.</li>
-  <li>Probe, scan, or test the vulnerability of the Service except as part of a coordinated security disclosure to <a href="mailto:security@tome.arroyoautomation.com">security@tome.arroyoautomation.com</a>.</li>
+  <li>Probe, scan, or test the vulnerability of the Service except as part of a coordinated security disclosure to <a href="mailto:security@tome.chrisarroyo.dev">security@tome.chrisarroyo.dev</a>.</li>
 </ul>
 <p>We may suspend or terminate accounts that violate these rules, with or without notice.</p>
 
@@ -151,7 +151,7 @@ const TERMS_BODY = `
 <p>We do not pre-screen user content. You can <strong>block</strong> any user from your <em>Profile</em> menu; blocked users will not appear in your friends search, activity feed, or club discussions. You can <strong>report</strong> a user or a discussion post from its context menu inside the app. We aim to review reports within 24 hours and will remove content or suspend accounts that violate these Terms. We have <strong>zero tolerance</strong> for objectionable content (illegal content, sexual content involving minors, doxxing, threats of violence) and abusive users.</p>
 
 <h2>6. DMCA / copyright complaints</h2>
-<p>If you believe content on Tome infringes your copyright, send a notice that includes the items required by 17 U.S.C. § 512(c)(3) to <a href="mailto:dmca@tome.arroyoautomation.com">dmca@tome.arroyoautomation.com</a>. We will respond as required by law.</p>
+<p>If you believe content on Tome infringes your copyright, send a notice that includes the items required by 17 U.S.C. § 512(c)(3) to <a href="mailto:dmca@tome.chrisarroyo.dev">dmca@tome.chrisarroyo.dev</a>. We will respond as required by law.</p>
 
 <h2>7. Library servers</h2>
 <p>Library servers paired to your account may be operated by you or by another Tome user. We do not control library servers we did not deploy, and we make no warranty about the availability, content, or behavior of any library server. If a library server is misbehaving, you can revoke its pairing from your account at any time.</p>
@@ -169,7 +169,7 @@ const TERMS_BODY = `
 <p>We may update these Terms from time to time. If we make material changes we’ll update the <em>Last updated</em> date and, where appropriate, notify you in the app. Continuing to use Tome after a change means you accept the revised Terms.</p>
 
 <h2>12. Contact</h2>
-<p>Questions? Email <a href="mailto:legal@tome.arroyoautomation.com">legal@tome.arroyoautomation.com</a>.</p>
+<p>Questions? Email <a href="mailto:legal@tome.chrisarroyo.dev">legal@tome.chrisarroyo.dev</a>.</p>
 `;
 
 const SUPPORT_BODY = `
@@ -180,10 +180,10 @@ const SUPPORT_BODY = `
 
 <h2>Get in touch</h2>
 <ul>
-  <li><strong>General help &amp; bug reports:</strong> <a href="mailto:support@tome.arroyoautomation.com">support@tome.arroyoautomation.com</a></li>
-  <li><strong>Privacy questions or data requests:</strong> <a href="mailto:privacy@tome.arroyoautomation.com">privacy@tome.arroyoautomation.com</a></li>
-  <li><strong>DMCA / copyright complaints:</strong> <a href="mailto:dmca@tome.arroyoautomation.com">dmca@tome.arroyoautomation.com</a></li>
-  <li><strong>Security disclosures:</strong> <a href="mailto:security@tome.arroyoautomation.com">security@tome.arroyoautomation.com</a></li>
+  <li><strong>General help &amp; bug reports:</strong> <a href="mailto:support@tome.chrisarroyo.dev">support@tome.chrisarroyo.dev</a></li>
+  <li><strong>Privacy questions or data requests:</strong> <a href="mailto:privacy@tome.chrisarroyo.dev">privacy@tome.chrisarroyo.dev</a></li>
+  <li><strong>DMCA / copyright complaints:</strong> <a href="mailto:dmca@tome.chrisarroyo.dev">dmca@tome.chrisarroyo.dev</a></li>
+  <li><strong>Security disclosures:</strong> <a href="mailto:security@tome.chrisarroyo.dev">security@tome.chrisarroyo.dev</a></li>
 </ul>
 <p>We aim to reply within 1–2 business days.</p>
 

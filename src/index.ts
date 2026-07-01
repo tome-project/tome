@@ -92,7 +92,7 @@ app.listen(port, () => {
     );
   } else {
     console.log(
-      `[mode] self-host — pairs through hub at ${process.env.HUB_URL || 'https://tome.arroyoautomation.com'}`,
+      `[mode] self-host — pairs through hub at ${process.env.HUB_URL || 'https://tome.chrisarroyo.dev'}`,
     );
   }
   console.log(`Open http://localhost:${port}/setup to pair this server.`);
