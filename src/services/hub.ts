@@ -109,7 +109,7 @@ export function isHubMode(): boolean {
 /// to prod; can be overridden for testing against a different Tome hub.
 export function hubBaseUrl(): string {
   return (
-    process.env.HUB_URL?.replace(/\/$/, '') || 'https://tome.arroyoautomation.com'
+    process.env.HUB_URL?.replace(/\/$/, '') || 'https://tome.chrisarroyo.dev'
   );
 }
 
