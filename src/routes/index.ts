@@ -9,6 +9,7 @@ export { scannerRouter } from './scanner';
 export { booksRouter } from './books';
 export { legalRouter } from './legal';
 export { requestsRouter } from './requests';
+export { bookRequestsRouter } from './book-requests';
 export { clubFilesRouter } from './club-files';
 
 // v0.6 federation routes (new)

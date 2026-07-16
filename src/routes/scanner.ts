@@ -19,6 +19,9 @@ interface CatalogBook {
   title: string;
   authors: string[];
   cover_url: string | null;
+  isbn_13?: string | null;
+  open_library_id?: string | null;
+  google_books_id?: string | null;
 }
 
 /// Look up (or create) a catalog row for a scanned book. Dedup order:
@@ -172,12 +175,18 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
       } else {
         await hub.from('library_server_books').insert(payload);
         added++;
-        const cleanIsbn = book.metadata.isbn?.replace(/[-\s]/g, '');
+        const cleanIsbn =
+          (catalog.isbn_13 ?? book.metadata.isbn)?.replace(/[-\s]/g, '') ??
+          null;
         const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
         await autoFulfillRequests({
           serverId: identity.serverId,
           catalogBookId: catalog.id,
           isbn13,
+          openLibraryId: catalog.open_library_id ?? null,
+          googleBooksId: catalog.google_books_id ?? null,
+          title: catalog.title ?? book.metadata.title,
+          authors: catalog.authors ?? book.metadata.authors,
         });
       }
 

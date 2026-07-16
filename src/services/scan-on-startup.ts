@@ -13,6 +13,11 @@ const coversDir = path.join(libraryPath, 'covers');
 interface CatalogBook {
   id: string;
   cover_url: string | null;
+  title?: string | null;
+  authors?: string[] | null;
+  isbn_13?: string | null;
+  open_library_id?: string | null;
+  google_books_id?: string | null;
 }
 
 /// Ensure a library_collections row exists for each top-level subdir
@@ -209,14 +214,19 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
         } else {
           await hub.from('library_server_books').insert(payload);
           added++;
-          // New server-book row — flip any matching pending book_requests
-          // to fulfilled. Match key is isbn_13.
-          const cleanIsbn = book.metadata.isbn?.replace(/[-\s]/g, '');
+          // New server-book row — flip any matching pending book_requests.
+          const cleanIsbn =
+            (catalog.isbn_13 ?? book.metadata.isbn)?.replace(/[-\s]/g, '') ??
+            null;
           const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
           await autoFulfillRequests({
             serverId: identity.serverId,
             catalogBookId: catalog.id,
             isbn13,
+            openLibraryId: catalog.open_library_id ?? null,
+            googleBooksId: catalog.google_books_id ?? null,
+            title: catalog.title ?? book.metadata.title,
+            authors: catalog.authors ?? book.metadata.authors,
           });
         }
 
