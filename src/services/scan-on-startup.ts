@@ -5,7 +5,10 @@ import { hubClient } from './hub';
 import { loadIdentity } from './server-identity';
 import { scanLibrary, ScannedBook } from './scanner';
 import { lookupExternalCover } from './cover-lookup';
-import { autoFulfillRequests } from './auto-fulfill';
+import {
+  autoFulfillRequests,
+  reconcilePendingRequests,
+} from './auto-fulfill';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
 const coversDir = path.join(libraryPath, 'covers');
@@ -214,7 +217,10 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
         } else {
           await hub.from('library_server_books').insert(payload);
           added++;
-          // New server-book row — flip any matching pending book_requests.
+        }
+        // Fulfill pending whether this book was already known or newly
+        // inserted — family often requests titles already on disk.
+        {
           const cleanIsbn =
             (catalog.isbn_13 ?? book.metadata.isbn)?.replace(/[-\s]/g, '') ??
             null;
@@ -312,6 +318,17 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
       }
     } catch (err) {
       console.error('[scan] prune step failed:', err);
+    }
+
+    // Match any still-pending requests against the whole library (covers
+    // fuzzy title cases the per-book path might miss).
+    try {
+      const r = await reconcilePendingRequests(identity.serverId);
+      if (r.fulfilled > 0) {
+        console.log(`[scan] reconciled ${r.fulfilled} pending request(s)`);
+      }
+    } catch (err) {
+      console.error('[scan] reconcile pending failed:', err);
     }
 
     summary = {

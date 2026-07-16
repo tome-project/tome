@@ -6,7 +6,10 @@ import { requireSupabaseAuth } from '../middleware/supabase-auth';
 import { hubClient } from '../services/hub';
 import { loadIdentity } from '../services/server-identity';
 import { scanLibrary, ScannedBook } from '../services/scanner';
-import { autoFulfillRequests } from '../services/auto-fulfill';
+import {
+  autoFulfillRequests,
+  reconcilePendingRequests,
+} from '../services/auto-fulfill';
 
 export const scannerRouter = Router();
 
@@ -175,20 +178,23 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
       } else {
         await hub.from('library_server_books').insert(payload);
         added++;
-        const cleanIsbn =
-          (catalog.isbn_13 ?? book.metadata.isbn)?.replace(/[-\s]/g, '') ??
-          null;
-        const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
-        await autoFulfillRequests({
-          serverId: identity.serverId,
-          catalogBookId: catalog.id,
-          isbn13,
-          openLibraryId: catalog.open_library_id ?? null,
-          googleBooksId: catalog.google_books_id ?? null,
-          title: catalog.title ?? book.metadata.title,
-          authors: catalog.authors ?? book.metadata.authors,
-        });
       }
+      // Fulfill pending requests against this book whether it was new or
+      // already on disk — requests often arrive after the file is already
+      // in LIBRARY_PATH (family asks for a series the host already has).
+      const cleanIsbn =
+        (catalog.isbn_13 ?? book.metadata.isbn)?.replace(/[-\s]/g, '') ??
+        null;
+      const isbn13 = cleanIsbn?.length === 13 ? cleanIsbn : null;
+      await autoFulfillRequests({
+        serverId: identity.serverId,
+        catalogBookId: catalog.id,
+        isbn13,
+        openLibraryId: catalog.open_library_id ?? null,
+        googleBooksId: catalog.google_books_id ?? null,
+        title: catalog.title ?? book.metadata.title,
+        authors: catalog.authors ?? book.metadata.authors,
+      });
 
       // Also add the book to the owner's shelf so it shows up in their
       // Library tab on first scan. Idempotent — if the row already
@@ -237,6 +243,16 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
     }
   }
 
+  // Final pass: match any still-pending requests against the whole library
+  // (covers title-fuzzy cases the per-book path might miss).
+  let reconciled = 0;
+  try {
+    const r = await reconcilePendingRequests(identity.serverId);
+    reconciled = r.fulfilled;
+  } catch (err) {
+    console.error('[scan] reconcile pending failed:', err);
+  }
+
   res.json({
     success: true,
     data: {
@@ -244,6 +260,7 @@ scannerRouter.post('/scan', requireSupabaseAuth, async (req: Request, res: Respo
       found: scan.books.length,
       added,
       updated,
+      requests_fulfilled: reconciled,
       skipped: scan.skipped.length > 0 ? scan.skipped : undefined,
       scan_errors: scan.errors.length > 0 ? scan.errors : undefined,
       errors: errors.length > 0 ? errors : undefined,

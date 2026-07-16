@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { requireSupabaseAuth } from '../middleware/supabase-auth';
 import { hubClient, hubConfigured } from '../services/hub';
 import { loadIdentity } from '../services/server-identity';
+import { reconcilePendingRequests } from '../services/auto-fulfill';
 import { sendSuccess, sendError } from '../utils';
 
 /**
@@ -94,6 +95,15 @@ bookRequestsRouter.get(
     }
 
     try {
+      // Opportunistic match against books already on disk before we report
+      // the queue. This is what makes "request a book we already have"
+      // feel automatic without waiting for a full scan.
+      try {
+        await reconcilePendingRequests(gate.serverId);
+      } catch (err) {
+        console.error('[book-requests] reconcile-on-list failed:', err);
+      }
+
       const hub = hubClient();
       const { data, error } = await hub
         .from('book_requests')
@@ -176,6 +186,30 @@ bookRequestsRouter.get(
       sendError(
         res,
         err instanceof Error ? err.message : 'Failed to list requests',
+        500,
+      );
+    }
+  },
+);
+
+/// Match every pending request against books already on this library
+/// server. Safe to call often — no-ops when the queue is empty.
+bookRequestsRouter.post(
+  '/api/v1/requests/reconcile',
+  requireSupabaseAuth,
+  async (req: Request, res: Response) => {
+    const gate = await assertServerActor(req.supabaseUserId!);
+    if (!gate.ok) {
+      sendError(res, gate.error, gate.status);
+      return;
+    }
+    try {
+      const result = await reconcilePendingRequests(gate.serverId);
+      sendSuccess(res, result);
+    } catch (err) {
+      sendError(
+        res,
+        err instanceof Error ? err.message : 'Reconcile failed',
         500,
       );
     }
