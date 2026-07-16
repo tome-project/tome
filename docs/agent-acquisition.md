@@ -3,17 +3,29 @@
 How a CLI agent (Grok / Claude / etc.) with access to the Tome **library
 server host** should fill requests from family members.
 
+## Critical: request is NOT automatic download
+
+Tapping **Request** in the app only inserts a `book_requests` row
+(`status=pending`). **Nothing** auto-starts Claude/Grok, torrents, or
+Audible. Acquisition only happens when **you** (or an agent you
+explicitly invoke on the host) work the queue.
+
+That is intentional: Tome must not be a bot that steals books. The app
+captures *demand*; the host still supplies *bytes*.
+
 ## The product loop
 
 ```
-Wife/kids in Tome app          You + agent on the server
-─────────────────────          ─────────────────────────
+Wife/kids in Tome app          You + agent on the server (manual invoke)
+─────────────────────          ─────────────────────────────────────────
 Search / type a title
 → Request from Chris's library
-→ sees "Pending"               GET /api/v1/requests/pending
-                               → try search_hints until found
-                               → drop file under LIBRARY_PATH
-                               → POST /scan  (or wait for boot scan)
+→ sees "Queued / Pending"      YOU open a CLI session and say
+                               "work the Tome request queue"
+                                 → list pending
+                                 → try search_hints until found
+                                 → drop file under LIBRARY_PATH
+                                 → POST /scan  (or app Scan now)
 → status flips to Fulfilled
 → open / play
 ```
