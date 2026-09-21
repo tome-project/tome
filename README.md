@@ -55,7 +55,7 @@ The server pairs to your account, scans `/library` in the background, and books 
 
 ### How pairing works
 
-The Tome hub at `tome.arroyoautomation.com` mints a per-server credential at pair time. Your server stores it in `<library>/.tome-server.json` and uses it to sign in to the catalog. RLS policies in the hub Supabase scope every write to *your* server's rows, so a paired server can never read or modify another user's data — even though everyone shares the same hub.
+The Tome hub at `tome.chrisarroyo.dev` mints a per-server credential at pair time. Your server stores it in `<library>/.tome-server.json` and uses it to sign in to the catalog. RLS policies in the hub Supabase scope every write to *your* server's rows, so a paired server can never read or modify another user's data — even though everyone shares the same hub.
 
 You don't manage Supabase, you don't manage tokens, and you don't see a service-role key.
 
@@ -67,7 +67,7 @@ The only thing you usually set is the volume.
 |---|---|---|---|
 | `LIBRARY_PATH` | yes | `/library` | Where your books live inside the container. Mount your real library here. |
 | `PUBLIC_URL` | recommended (remote) | (request host) | Public URL the app uses to reach this server. Set this if you're behind Cloudflare Tunnel / Tailscale. |
-| `HUB_URL` | no | `https://tome.arroyoautomation.com` | Override only if you're running your own hub. |
+| `HUB_URL` | no | `https://tome.chrisarroyo.dev` | Override only if you're running your own hub. |
 | `PORT` | no | `3000` | HTTP port. |
 | `CORS_ORIGIN` | no | `*` | Origin allowlist for cross-origin requests. |
 

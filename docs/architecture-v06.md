@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  SUPABASE  (the hub — `tome.arroyoautomation.com`)      │
+│  SUPABASE  (the hub — `tome.chrisarroyo.dev`)      │
 │  ─────────────────────────────────────────────────────  │
 │  • Auth (Supabase Auth: email/password, magic, OAuth)   │
 │  • user_profiles, friendships, clubs, discussions       │
@@ -107,6 +107,6 @@ Plex-style 6-digit code, app-initiated:
 1. Wipe Supabase project (drop public schema, drop public auth users)
 2. Apply `001_initial_schema.sql`
 3. Update `tome-project/tome` (server) to library-server-only mode
-4. Redeploy `tome.arroyoautomation.com` to docker-vm — but this becomes Chris's *personal library server*, not a "hub." The hub IS Supabase.
+4. Redeploy `tome.chrisarroyo.dev` to docker-vm — but this becomes Chris's *personal library server*, not a "hub." The hub IS Supabase.
 5. Ship new TestFlight (using `supabase_flutter`, talking to Supabase directly)
 6. Validate: register, claim handle, friend invite, club, sideload, library server pair, share with friend
