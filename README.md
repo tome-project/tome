@@ -48,10 +48,11 @@ docker run -d \
 Then:
 
 1. Install the [Tome app](https://apps.apple.com/app/tome) and sign in.
-2. In the app: **Profile → Libraries → Connect a library server → Generate code**.
-3. In a browser visit `http://<your-server>:3000/setup` and paste the 6-digit code.
+2. In the app, tap **Set up the server**. It shows a 6-digit code.
+3. On the same network, open `http://<that-computer>:3000/setup` in a browser and enter the code.
+4. Back in the app, tap **Share with the house**. Everyone else joins from that link.
 
-The server pairs to your account, scans `/library` in the background, and books appear in the app within a minute. Friends you share the library with get the same files streamed from your hardware — no second install on their end.
+The server pairs to your account and scans `/library` in the background. Books show up in the app within a minute. People you share with stream those files from your hardware. They don't install a server.
 
 ### How pairing works
 
