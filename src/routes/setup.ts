@@ -104,9 +104,9 @@ SUPABASE_SERVICE_ROLE_KEY=&lt;your service role key&gt;</pre>
 
 function pairFormPage(): string {
   return renderShell('Pair this server', `
-  <p class="lede">Generate a 6-digit code in the Tome app under
-    <code>Settings → Connect a library server</code>, then paste it here
-    to bind this server to your account.</p>
+  <p class="lede">In the Tome app, tap <strong>Set up the server</strong>.
+    It shows a 6-digit code. Type that code here. This page and the phone
+    need to be on the same network.</p>
   <form class="card" method="POST" action="/setup" autocomplete="off">
     <div class="row">
       <label for="name">Library name</label>
@@ -149,7 +149,9 @@ async function pairedPage(): Promise<string> {
 
   return renderShell('Paired ✓', `
   <p class="lede"><span class="ok">Paired.</span> This server is online and
-    connected to your Tome account.</p>
+    connected to your Tome account. In the app, tap
+    <strong>Share with the house</strong>. Everyone else joins from that
+    link. They don't run a server.</p>
   <div class="card">
     <p class="rowline"><strong>${escapeHtml(id.serverName)}</strong>
        <span class="dim">·</span> <span class="dim">${bookCount} book${bookCount === 1 ? '' : 's'}</span></p>

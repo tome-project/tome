@@ -22,6 +22,7 @@ import {
   hubRouter,
   clubFilesRouter,
 } from './routes';
+import { joinRouter } from './routes/join';
 import { errorHandler } from './middleware';
 import { loadIdentity } from './services/server-identity';
 import { runScanForOwner } from './services/scan-on-startup';
@@ -69,6 +70,7 @@ app.use(limiter);
 // no longer registered.
 // ---------------------------------------------------------------------------
 app.use(healthRouter);
+app.use(joinRouter);      // GET /join/:token → household invite landing
 app.use(setupRouter);     // GET / and /setup → web wizard; POST /setup → claim
 app.use(pairingRouter);   // POST /pair (CLI alternative to the wizard)
 if (isHubMode()) {

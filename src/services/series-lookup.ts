@@ -132,7 +132,16 @@ export async function detectSeries(
   isbn: string | null,
 ): Promise<DetectedSeries | null> {
   if (!title || title.length < 2) return null;
-  const author = authors[0] ?? '';
+
+  // Local heuristics first — free, instant, and accurate for well-named
+  // rip folders (Mistborn 01 - …, HP-1 Harry Potter …).
+  const fromTitle = inferSeriesFromFolderName(title);
+  if (fromTitle) return fromTitle;
+
+  const lookupTitle = cleanTitleForSeriesLookup(title);
+  const author = (authors[0] ?? '')
+    .replace(/\s*,?\s*[Nn]arrated [Bb]y\b.*$/u, '')
+    .trim();
 
   // Google's seriesInfo gives a structured position (bookDisplayNumber)
   // but only an opaque seriesId — no human-readable series name. Open
@@ -148,7 +157,7 @@ export async function detectSeries(
     }
   }
 
-  const olParams = new URLSearchParams({ title });
+  const olParams = new URLSearchParams({ title: lookupTitle || title });
   if (author) olParams.set('author', author);
   const olDocs = await openLibrarySearch(olParams.toString());
   const olHit = olDocs.find(
@@ -156,7 +165,8 @@ export async function detectSeries(
   );
   if (olHit?.series && olHit.series[0]) {
     const name = olHit.series[0].trim();
-    const position = positionFromGoogle ?? positionFromTitle(title, name);
+    const position =
+      positionFromGoogle ?? positionFromTitle(lookupTitle || title, name);
     return { name, position };
   }
 
@@ -165,20 +175,95 @@ export async function detectSeries(
   // ("Carl's Doomsday Scenario (Dungeon Crawler Carl, Book 2)" — very
   // common in self-pub).
   const gbItems = await googleBooksLookup(
-    [`intitle:"${title}"`, author ? `inauthor:"${author}"` : ''].filter(Boolean).join('+'),
+    [`intitle:"${lookupTitle || title}"`, author ? `inauthor:"${author}"` : '']
+      .filter(Boolean)
+      .join('+'),
     1,
   );
   const sInfo = gbItems[0]?.volumeInfo?.seriesInfo;
-  const inferred = inferSeriesNameFromTitle(title) ?? inferSeriesNameFromTitle(gbItems[0]?.volumeInfo?.title ?? '');
+  const inferred =
+    inferSeriesNameFromTitle(lookupTitle || title) ??
+    inferSeriesNameFromTitle(gbItems[0]?.volumeInfo?.title ?? '');
   if (inferred) {
     const position =
       positionFromGoogle ??
       parsePosition(sInfo?.bookDisplayNumber) ??
-      positionFromTitle(title, inferred);
+      positionFromTitle(lookupTitle || title, inferred);
     return { name: inferred, position };
   }
 
   return null;
+}
+
+/// Infer series from a library-relative path. Homelab layouts typically look
+/// like `audiobooks/<Author>/<Series> NN - <Title>/…` or
+/// `kids/<Author>/<Series> NN - <Title>`. Returns null for standalone titles.
+export function inferSeriesFromPath(relativePath: string): DetectedSeries | null {
+  if (!relativePath) return null;
+  const parts = relativePath.split(/[/\\]/).filter(Boolean);
+  if (parts.length < 2) return null;
+
+  // File leaf → use parent directory as the book folder; bare dirs
+  // (multi-track) are themselves the book folder.
+  const last = parts[parts.length - 1]!;
+  const bookDir =
+    last.includes('.') && parts.length >= 2 ? parts[parts.length - 2]! : last;
+
+  return inferSeriesFromFolderName(bookDir) ??
+    inferSeriesFromFolderName(last.replace(/\.[^.]+$/, ''));
+}
+
+/// "Mistborn 01 - The Final Empire" → { Mistborn, 1 }
+/// "Dungeon Crawler Carl 02" → { Dungeon Crawler Carl, 2 }
+export function inferSeriesFromFolderName(name: string): DetectedSeries | null {
+  let cleaned = name.trim();
+  if (!cleaned) return null;
+
+  // Strip a leading "Author - " when the remainder still looks like
+  // "Series NN - Title". Without this, titles like "Brandon Sanderson -
+  // Mistborn 01 - The Final Empire" become series "Brandon Sanderson - Mistborn".
+  const authorStrip = cleaned.match(
+    /^([^0-9]+?)\s+-\s+(.+\s+\d{1,2}(?:\.\d+)?\s*[-–:].+)$/,
+  );
+  if (authorStrip && !/\d/.test(authorStrip[1]!)) {
+    cleaned = authorStrip[2]!.trim();
+  }
+
+  // Series NN - Title  /  Series NN: Title  /  Series NN – Title
+  // Require the series token itself to contain no " - " so we don't glue
+  // author into the series name. Require a letter so "01 - Title" / "Binding 13"
+  // don't become series hits.
+  let m = cleaned.match(
+    /^([^-–:]*[A-Za-z][^-–:]*?)\s+(\d{1,2})(?:\.\d+)?\s*[-–:]\s+.+$/,
+  );
+  if (m) {
+    const series = m[1]!.trim();
+    if (series.length >= 2 && !/^(chapter|track|part|disc|cd)$/i.test(series)) {
+      return { name: series, position: parseFloat(m[2]!) };
+    }
+  }
+
+  // Compact rip prefixes: "HP-1 Harry Potter And The Philosopher's Stone"
+  m = cleaned.match(/^[A-Z]{1,6}-(\d+(?:\.\d+)?)\s+(.+)$/);
+  if (m) {
+    const rest = m[2]!.trim();
+    // Prefer a known multi-word franchise prefix when present
+    const franchise = rest.match(/^(Harry Potter|Hunger Games|Percy Jackson)\b/i);
+    if (franchise) {
+      return { name: franchise[1]!, position: parseFloat(m[1]!) };
+    }
+  }
+
+  return null;
+}
+
+/// Strip ripper / narrator noise before external lookups.
+export function cleanTitleForSeriesLookup(title: string): string {
+  return title
+    .replace(/\s*,?\s*[Nn]arrated [Bb]y\b.*$/u, '')
+    .replace(/^\s*[A-Z]{1,6}-\d+(?:\.\d+)?\s+/u, '')
+    .replace(/,\s*Part\s+\d+\s*$/i, '')
+    .trim();
 }
 
 /// Best-effort: titles like "Carl's Doomsday Scenario (Dungeon Crawler

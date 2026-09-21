@@ -282,7 +282,8 @@ bookRequestsRouter.post(
 
     try {
       const hub = hubClient();
-      // Append decline reason into note if provided (schema has no decline_reason).
+      // Append decline reason into note if provided (legacy); decline_note
+      // is the member-facing field.
       const { data: existing } = await hub
         .from('book_requests')
         .select('id, note')
@@ -305,6 +306,7 @@ bookRequestsRouter.post(
         .update({
           status: 'declined',
           declined_at: new Date().toISOString(),
+          decline_note: note,
           note: mergedNote,
         })
         .eq('id', id);

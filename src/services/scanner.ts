@@ -88,25 +88,38 @@ async function* walkBookFiles(root: string): AsyncGenerator<DiscoveryYield> {
   });
   const epubs = files.filter((f) => path.extname(f.name).toLowerCase() === '.epub');
 
-  // m4b/m4a: each file is its own audiobook (typical for series)
-  for (const f of m4bs) {
-    yield { kind: 'book', path: path.join(root, f.name) };
-  }
-
-  // mp3: single = single-file audiobook; multiple = multi-track audiobook
-  if (mp3s.length === 1 && m4bs.length === 0) {
+  // Multiple m4b/m4a in one folder = one multi-track audiobook (Part 1/2
+  // splits, chaptered m4b packs like "Shadows of Self - 01..N"). A single
+  // m4b per folder stays one book — that's the normal series layout
+  // (`Mistborn 04 - The Alloy of Law/The Alloy of Law.m4b`).
+  if (m4bs.length > 1) {
+    const trackPaths = m4bs
+      .map((f) => path.join(root, f.name))
+      .sort(naturalCompare);
+    yield { kind: 'audiobook-multi', dirPath: root, trackPaths };
+    if (mp3s.length > 0) {
+      yield {
+        kind: 'skip',
+        path: root,
+        reason: `${mp3s.length} mp3 file(s) ignored — multi-m4b is canonical for this folder`,
+      };
+    }
+  } else if (m4bs.length === 1) {
+    yield { kind: 'book', path: path.join(root, m4bs[0].name) };
+    if (mp3s.length > 0) {
+      yield {
+        kind: 'skip',
+        path: root,
+        reason: `${mp3s.length} mp3 file(s) ignored — m4b is canonical for this folder`,
+      };
+    }
+  } else if (mp3s.length === 1) {
     yield { kind: 'book', path: path.join(root, mp3s[0].name) };
-  } else if (mp3s.length > 1 && m4bs.length === 0) {
+  } else if (mp3s.length > 1) {
     const trackPaths = mp3s
       .map((f) => path.join(root, f.name))
       .sort(naturalCompare);
     yield { kind: 'audiobook-multi', dirPath: root, trackPaths };
-  } else if (mp3s.length > 0 && m4bs.length > 0) {
-    yield {
-      kind: 'skip',
-      path: root,
-      reason: `${mp3s.length} mp3 file(s) ignored — m4b is canonical for this folder`,
-    };
   }
 
   // ebooks: each emits individually
@@ -246,6 +259,8 @@ function stripTitleNoise(raw: string): string {
     t = t.replace(_PARENS_NOISE, '').replace(_RETAIL_NOISE, '').trim();
     if (t === before) break;
   }
+  // Multi-file splits often stamp ", Part 1" onto the book title.
+  t = t.replace(/,\s*part\s+\d+\s*$/i, '').trim();
   return t;
 }
 
@@ -254,8 +269,21 @@ function stripTitleNoise(raw: string): string {
 function isJunkTitle(raw: string | undefined): boolean {
   if (!raw) return true;
   const t = stripTitleNoise(raw);
-  if (t.length < 2) return true;
+  if (t.length === 0) return true;
+  if (t.length === 1) return true;
   if (/^\d+$/.test(t)) return true;
+  return false;
+}
+
+/// Titles that are chapter/part labels, not book names — common on
+/// multi-file m4b packs ("Part 1", "Shadows of Self - 01").
+function looksLikeTrackOrPartTitle(raw: string | undefined): boolean {
+  if (!raw) return true;
+  const t = stripTitleNoise(raw);
+  if (/^(part|disc|disk|cd|track|chapter|file)\s*#?\s*\d+/i.test(t)) return true;
+  if (/,\s*part\s+\d+/i.test(t)) return true;
+  // "Shadows of Self - 01" / "Title - 12"
+  if (/\s[-–]\s*\d{1,3}$/.test(t)) return true;
   return false;
 }
 
@@ -407,9 +435,17 @@ async function scanAudiobookMulti(
   // number ("1"). Fall back to the dir basename when the album is junk.
   const dirBase = path.basename(dirPath);
   const cleanedAlbum = albumTag ? stripTitleNoise(albumTag) : '';
-  if (!isJunkTitle(cleanedAlbum)) {
+  if (
+    !isJunkTitle(cleanedAlbum) &&
+    !looksLikeTrackOrPartTitle(cleanedAlbum)
+  ) {
     metadata.title = cleanedAlbum;
   } else {
+    metadata.title = dirNameAsTitle(dirBase, metadata.authors[0]);
+  }
+  // Track-0 ID3 title is often "Part 1" / "Shadows of Self - 01" — never
+  // keep that as the book title once we know we're in a multi-file folder.
+  if (looksLikeTrackOrPartTitle(metadata.title) || isJunkTitle(metadata.title)) {
     metadata.title = dirNameAsTitle(dirBase, metadata.authors[0]);
   }
 
@@ -531,9 +567,13 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
       out.authors[0] = pathAuthor;
     }
 
-    // Title polish: strip noise universally, then fall back when junk.
+    // Title polish: strip noise universally, then fall back when junk or
+    // when a multi-track folder still carries a part/chapter label.
     out.title = stripTitleNoise(out.title);
-    if (isJunkTitle(out.title)) {
+    if (
+      isJunkTitle(out.title) ||
+      (isMultiTrackDir && looksLikeTrackOrPartTitle(out.title))
+    ) {
       const dirBase = isMultiTrackDir
         ? path.basename(absolutePath)
         : path.basename(absolutePath, path.extname(absolutePath));

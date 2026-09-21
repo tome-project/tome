@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  SUPABASE  (the hub — `tome.chrisarroyo.dev`)      │
+│  SUPABASE  (the hub — `tome.chrisarroyo.dev`)           │
 │  ─────────────────────────────────────────────────────  │
 │  • Auth (Supabase Auth: email/password, magic, OAuth)   │
 │  • user_profiles, friendships, clubs, discussions       │
