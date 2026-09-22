@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import { extractEpubMetadata } from './epub-metadata';
+import { ensureAudiobookFastStart } from './faststart';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -633,6 +634,10 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
       const fileStat = await fsp.stat(filePath);
       const ext = path.extname(filePath).toLowerCase();
       const mediaType: 'audiobook' | 'epub' = AUDIOBOOK_EXTS.has(ext) ? 'audiobook' : 'epub';
+
+      if (mediaType === 'audiobook' && (ext === '.m4a' || ext === '.m4b')) {
+        await ensureAudiobookFastStart(filePath);
+      }
 
       const { metadata, coverImage } =
         mediaType === 'audiobook'
