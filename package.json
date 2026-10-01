@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "test": "npm run build && node --test test/background-job.test.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",

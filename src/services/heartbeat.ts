@@ -1,6 +1,7 @@
 import os from 'os';
 import { hubClient, resetHubClient, initHubClient } from './hub';
 import { loadIdentity } from './server-identity';
+import { startBackgroundJob } from './background-job';
 
 /// Periodically pokes library_servers.last_seen_at + version + platform
 /// so the app can show a fresh "online" indicator. Runs in the
@@ -10,28 +11,30 @@ import { loadIdentity } from './server-identity';
 /// online dot without hammering the hub.
 const INTERVAL_MS = 60_000;
 
-let _timer: NodeJS.Timeout | null = null;
+let _stop: (() => void) | null = null;
 let _consecutiveFailures = 0;
 
 export function startHeartbeat(): void {
-  if (_timer) return;
+  if (_stop) return;
   // Fire immediately so a freshly-paired server lights up online without
   // waiting a full minute.
-  void _tick();
-  _timer = setInterval(() => void _tick(), INTERVAL_MS);
+  _stop = startBackgroundJob({ name: 'heartbeat', run: _tick, intervalMs: INTERVAL_MS, immediate: true });
 }
 
 export function stopHeartbeat(): void {
-  if (_timer) {
-    clearInterval(_timer);
-    _timer = null;
+  if (_stop) {
+    _stop();
+    _stop = null;
   }
 }
 
-async function _tick(): Promise<void> {
+async function _tick(signal: AbortSignal): Promise<void> {
   const identity = loadIdentity();
   if (!identity) return;
   try {
+    // Failed re-login leaves no client; the next backed-off tick must retry.
+    await initHubClient(signal);
+    signal.throwIfAborted();
     const { error } = await hubClient()
       .from('library_servers')
       .update({
@@ -39,7 +42,8 @@ async function _tick(): Promise<void> {
         platform: process.platform,
         version: process.env.npm_package_version || '0.7.0',
       })
-      .eq('id', identity.serverId);
+      .eq('id', identity.serverId)
+      .abortSignal(signal);
 
     if (error) {
       // supabase-js returns { error } on RLS denial / JWT expiry rather
@@ -52,12 +56,14 @@ async function _tick(): Promise<void> {
       if (looksLikeAuth) {
         console.warn('[heartbeat] auth error — re-signing in:', msg);
         resetHubClient();
-        await initHubClient();
+        await initHubClient(signal);
+        signal.throwIfAborted();
         // Retry once; if it still fails, fall through to error logging below.
         const retry = await hubClient()
           .from('library_servers')
           .update({ last_seen_at: new Date().toISOString() })
-          .eq('id', identity.serverId);
+          .eq('id', identity.serverId)
+          .abortSignal(signal);
         if (retry.error) throw new Error(retry.error.message);
       } else {
         throw new Error(msg);
@@ -73,11 +79,16 @@ async function _tick(): Promise<void> {
     if (_consecutiveFailures <= 2) {
       console.error('[heartbeat]', msg);
     } else {
+      const looksTransient =
+        /aborted|timeout|gateway|fetch failed|network|econnreset|enotfound|undici/i.test(msg);
       console.error(
-        `[heartbeat] still failing after ${_consecutiveFailures} ticks: ${msg}. ` +
-          'If this persists, your pairing may have been revoked — visit /setup to re-pair.',
+        `[heartbeat] still failing after ${_consecutiveFailures} ticks: ${msg}.` +
+          (looksTransient
+            ? ' Hub/API is unreachable; pairing is unchanged.'
+            : ' If this persists, your pairing may have been revoked — visit /setup to re-pair.'),
       );
     }
+    throw err;
   }
   if (process.env.HEARTBEAT_VERBOSE === '1') {
     console.log(`[heartbeat] ${os.hostname()} → ${identity.serverId}`);

@@ -30,6 +30,7 @@ import { startHeartbeat } from './services/heartbeat';
 import { verifyIdentityOrUnpair } from './services/identity-check';
 import { initHubClient, isHubMode, hubConfigured } from './services/hub';
 import { reconcilePendingRequests } from './services/auto-fulfill';
+import { startBackgroundJob } from './services/background-job';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -136,7 +137,11 @@ app.listen(port, () => {
     }
     startHeartbeat();
     try {
-      await runScanForOwner();
+      if (process.env.TOME_SKIP_STARTUP_SCAN === '1') {
+        console.log('[startup-scan] skipped by deployment configuration');
+      } else {
+        await runScanForOwner();
+      }
     } catch (err) {
       console.error('[startup-scan] failed', err);
     }
@@ -147,13 +152,14 @@ app.listen(port, () => {
     // for a book we already have" becomes Ready without a manual scan.
     // Does NOT acquire missing files — that still needs a human/agent.
     const RECONCILE_MS = 60_000;
-    setInterval(() => {
-      const id = loadIdentity();
-      if (!id) return;
-      void reconcilePendingRequests(id.serverId).catch((err) => {
-        console.error('[reconcile] interval failed:', err);
-      });
-    }, RECONCILE_MS);
+    startBackgroundJob({
+      name: 'reconcile',
+      intervalMs: RECONCILE_MS,
+      run: async (signal) => {
+        const id = loadIdentity();
+        if (id) await reconcilePendingRequests(id.serverId, signal);
+      },
+    });
     console.log(
       `[reconcile] matching pending requests to library every ${RECONCILE_MS / 1000}s`,
     );
