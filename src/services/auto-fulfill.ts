@@ -169,30 +169,37 @@ function authorsOverlap(a: string, b: string): boolean {
  */
 export async function reconcilePendingRequests(
   serverId: string,
+  signal?: AbortSignal,
 ): Promise<{ checked: number; fulfilled: number }> {
   const hub = hubClient();
-  const { data: pending, error: pErr } = await hub
+  let pendingQuery = hub
     .from('book_requests')
     .select(
       'id, title, authors, isbn_13, open_library_id, google_books_id',
     )
     .eq('server_id', serverId)
     .eq('status', 'pending');
+  if (signal) pendingQuery = pendingQuery.abortSignal(signal);
+  const { data: pending, error: pErr } = await pendingQuery;
   if (pErr) {
     console.error('[auto-fulfill] reconcile load pending failed:', pErr);
+    if (signal) throw new Error(pErr.message);
     return { checked: 0, fulfilled: 0 };
   }
   if (!pending?.length) return { checked: 0, fulfilled: 0 };
 
   // All books currently hosted on this server + catalog identity.
-  const { data: hosted, error: hErr } = await hub
+  let hostedQuery = hub
     .from('library_server_books')
     .select(
       'book_id, books:book_id(id, title, authors, isbn_13, open_library_id, google_books_id)',
     )
     .eq('server_id', serverId);
+  if (signal) hostedQuery = hostedQuery.abortSignal(signal);
+  const { data: hosted, error: hErr } = await hostedQuery;
   if (hErr) {
     console.error('[auto-fulfill] reconcile load library failed:', hErr);
+    if (signal) throw new Error(hErr.message);
     return { checked: pending.length, fulfilled: 0 };
   }
 
@@ -231,7 +238,7 @@ export async function reconcilePendingRequests(
     );
     if (!match) continue;
 
-    const { data, error } = await hub
+    let fulfillQuery = hub
       .from('book_requests')
       .update({
         status: 'fulfilled',
@@ -241,8 +248,11 @@ export async function reconcilePendingRequests(
       .eq('id', req.id)
       .eq('status', 'pending')
       .select('id');
+    if (signal) fulfillQuery = fulfillQuery.abortSignal(signal);
+    const { data, error } = await fulfillQuery;
     if (error) {
       console.error('[auto-fulfill] reconcile fulfill failed:', error);
+      if (signal) throw new Error(error.message);
       continue;
     }
     if (data?.length) {
