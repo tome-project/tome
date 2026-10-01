@@ -32,6 +32,9 @@ async function _tick(signal: AbortSignal): Promise<void> {
   const identity = loadIdentity();
   if (!identity) return;
   try {
+    // Failed re-login leaves no client; the next backed-off tick must retry.
+    await initHubClient(signal);
+    signal.throwIfAborted();
     const { error } = await hubClient()
       .from('library_servers')
       .update({
@@ -53,7 +56,7 @@ async function _tick(signal: AbortSignal): Promise<void> {
       if (looksLikeAuth) {
         console.warn('[heartbeat] auth error — re-signing in:', msg);
         resetHubClient();
-        await initHubClient();
+        await initHubClient(signal);
         signal.throwIfAborted();
         // Retry once; if it still fails, fall through to error logging below.
         const retry = await hubClient()

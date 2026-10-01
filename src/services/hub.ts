@@ -25,6 +25,15 @@ const DEFAULT_SUPABASE_URL = 'https://zflawbkznckwlutlcgjh.supabase.co';
 const DEFAULT_SUPABASE_ANON_KEY =
   'sb_publishable_k-NU9SmkTArQZqY1R6Fe0g_4Ef4kSY_';
 
+// Preserve the production transport deadline, including response-body reads.
+// This also bounds the identity check that runs before background startup.
+const HUB_FETCH_MS = 8_000;
+const timedHubFetch: typeof fetch = (input, init) => {
+  const signals = [AbortSignal.timeout(HUB_FETCH_MS)];
+  if (init?.signal) signals.push(init.signal);
+  return fetch(input, { ...init, signal: AbortSignal.any(signals) });
+};
+
 let _client: SupabaseClient | null = null;
 let _initPromise: Promise<void> | null = null;
 
@@ -40,14 +49,20 @@ export function hubClient(): SupabaseClient {
 /// Initialize the Supabase client. Safe to call multiple times — the
 /// second call is a no-op. Throws if the server is misconfigured (no
 /// service role and not paired yet).
-export async function initHubClient(): Promise<void> {
+export async function initHubClient(signal?: AbortSignal): Promise<void> {
   if (_client) return;
   if (_initPromise) return _initPromise;
-  _initPromise = _doInit();
-  return _initPromise;
+  _initPromise = _doInit(signal);
+  try {
+    await _initPromise;
+  } finally {
+    // Every failed initialization must be retryable by the next job.
+    _initPromise = null;
+  }
 }
 
-async function _doInit(): Promise<void> {
+async function _doInit(signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const url = process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -57,6 +72,7 @@ async function _doInit(): Promise<void> {
   if (serviceRoleKey) {
     _client = createClient(url, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
+      global: { fetch: timedHubFetch },
     });
     return;
   }
@@ -71,20 +87,37 @@ async function _doInit(): Promise<void> {
   }
   const anonKey = process.env.SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
   const supabaseUrl = identity.supabaseUrl || url;
-  _client = createClient(supabaseUrl, anonKey, {
+  // Only bind the job signal during sign-in. Keeping it on the persistent
+  // client would make later jobs fail after this job's deadline expires.
+  let signInSignal = signal;
+  const candidate = createClient(supabaseUrl, anonKey, {
     auth: { autoRefreshToken: true, persistSession: false },
+    global: {
+      fetch: (input, init) => {
+        const parent = signInSignal;
+        const combined = parent
+          ? AbortSignal.any(init?.signal ? [parent, init.signal] : [parent])
+          : init?.signal;
+        return timedHubFetch(input, { ...init, signal: combined });
+      },
+    },
   });
-  const { error } = await _client.auth.signInWithPassword({
-    email: identity.supabaseEmail,
-    password: identity.supabasePassword,
-  });
-  if (error) {
-    _client = null;
-    _initPromise = null;
-    throw new Error(
-      `Failed to sign into Supabase as library server: ${error.message}. ` +
-        'You may need to re-pair this server (POST /setup/reset, then a fresh code).',
-    );
+  try {
+    const { error } = await candidate.auth.signInWithPassword({
+      email: identity.supabaseEmail,
+      password: identity.supabasePassword,
+    });
+    signal?.throwIfAborted();
+    if (error) {
+      throw new Error(
+        `Failed to sign into Supabase as library server: ${error.message}. ` +
+          'You may need to re-pair this server (POST /setup/reset, then a fresh code).',
+      );
+    }
+    // Do not publish a half-initialized client to concurrent callers.
+    _client = candidate;
+  } finally {
+    signInSignal = undefined;
   }
 }
 

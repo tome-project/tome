@@ -130,7 +130,7 @@ test('heartbeat preserves target and auth retry, and propagates deadline failure
     heartbeat.startHeartbeat(); heartbeat.startHeartbeat();
     assert.equal(starts, 1);
     await run(new AbortController().signal);
-    assert.equal(initCalls, 1); assert.equal(fetchCalls, 2);
+    assert.equal(initCalls, 2); assert.equal(fetchCalls, 2);
     assert.ok(urls.every(url => url.includes('id=eq.server-fixture')));
     hub.hubClient = () => fakeClient(async (url, options) => {
       options.signal.throwIfAborted();
@@ -138,11 +138,78 @@ test('heartbeat preserves target and auth retry, and propagates deadline failure
     });
     const controller = new AbortController(); controller.abort();
     await assert.rejects(run(controller.signal), /aborted/i);
-    assert.equal(initCalls, 1);
+    assert.equal(initCalls, 3);
   } finally {
     heartbeat.stopHeartbeat(); scheduler.startBackgroundJob = originalStart;
     identity.loadIdentity = originalIdentity;
   }
+});
+
+function isolatedHub({ fetcher, signInError } = {}) {
+  const exports = {}; const deadlines = []; const clients = [];
+  const fakeAbortSignal = {
+    any: signals => AbortSignal.any(signals),
+    timeout: ms => {
+      const controller = new AbortController(); deadlines.push({ ms, controller });
+      return controller.signal;
+    },
+  };
+  const create = (url, key, options) => {
+    const client = { options, auth: { signInWithPassword: async () => {
+      if (signInError) return { error: signInError() };
+      await options.global.fetch('https://example.invalid/auth', {});
+      return { error: null };
+    } } };
+    clients.push(client); return client;
+  };
+  vm.runInNewContext(fs.readFileSync(require.resolve('../dist/services/hub'), 'utf8'), {
+    exports, AbortSignal: fakeAbortSignal, fetch: fetcher,
+    process: { env: {} },
+    require: name => {
+      if (name === '@supabase/supabase-js') return { createClient: create };
+      assert.equal(name, './server-identity');
+      return { loadIdentity: () => ({ supabaseEmail: 'fixture@example.invalid', supabasePassword: 'fixture-only' }) };
+    },
+  });
+  return { hub: exports, deadlines, clients };
+}
+
+test('aborted sign-in clears initialization and recovers without retaining the old job signal', async () => {
+  let hang = true; let transportSignal; let listeners = 0;
+  const mock = isolatedHub({ fetcher: (url, options) => {
+    transportSignal = options.signal;
+    if (!hang) return Promise.resolve(json({}));
+    return new Promise((resolve, reject) => {
+      const onAbort = () => { listeners--; options.signal.removeEventListener('abort', onAbort); reject(new DOMException('aborted', 'AbortError')); };
+      listeners++; options.signal.addEventListener('abort', onAbort);
+    });
+  } });
+  const first = new AbortController(); const pending = mock.hub.initHubClient(first.signal);
+  assert.equal(mock.deadlines[0].ms, 8000);
+  assert.throws(() => mock.hub.hubClient(), /before initHubClient/);
+  first.abort(); await assert.rejects(pending, /aborted/);
+  assert.equal(transportSignal.aborted, true); assert.equal(listeners, 0);
+  hang = false; const second = new AbortController(); await mock.hub.initHubClient(second.signal);
+  const client = mock.hub.hubClient(); second.abort();
+  await client.options.global.fetch('https://example.invalid/rest', {});
+  assert.equal(transportSignal.aborted, false);
+  assert.ok(mock.deadlines.every(x => x.ms === 8000));
+});
+
+test('sign-in rejection is retryable, and nested caller/deadline abort signals propagate', async () => {
+  let rejectSignIn = true; let observed;
+  const mock = isolatedHub({
+    signInError: () => rejectSignIn ? { message: 'fixture auth unavailable' } : null,
+    fetcher: async (url, options) => { observed = options.signal; return json({}); },
+  });
+  await assert.rejects(mock.hub.initHubClient(new AbortController().signal), /fixture auth unavailable/);
+  assert.throws(() => mock.hub.hubClient(), /before initHubClient/);
+  rejectSignIn = false; await mock.hub.initHubClient(new AbortController().signal);
+  const client = mock.hub.hubClient(); const parent = new AbortController();
+  await client.options.global.fetch('https://example.invalid/rest', { signal: parent.signal });
+  parent.abort(); assert.equal(observed.aborted, true);
+  await client.options.global.fetch('https://example.invalid/rest', {});
+  mock.deadlines.at(-1).controller.abort(); assert.equal(observed.aborted, true);
 });
 
 test('deployment skip flag suppresses only the boot scan and retains background startup', async () => {
