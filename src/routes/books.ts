@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import path from 'path';
+import { containedPath } from '../services/file-stream';
+import { callerClient } from '../services/caller-client';
+import { loadIdentity } from '../services/server-identity';
 import { spawn } from 'child_process';
 import { requireSupabaseAuth } from '../middleware/supabase-auth';
-import { selectMany } from '../services/db';
 import { sendSuccess, sendError } from '../utils';
 
 const libraryPath = process.env.LIBRARY_PATH || './library';
@@ -38,7 +39,7 @@ function ffprobeChapters(filePath: string): Promise<FfprobeChaptersOutput> {
       '-show_chapters',
       filePath,
     ];
-    const child = spawn('ffprobe', args);
+    const child = spawn('ffprobe', args, { timeout: 30_000 });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => { stdout += c; });
@@ -92,35 +93,12 @@ booksRouter.get(
       // grant on the same collection that hosts the book. Done with one
       // query so we don't fan out per-server, and keyed through
       // `library_servers` so we can prefer the caller's own copy.
-      const sources = await selectMany<{
-        owner_id: string;
-        media_type: string;
-        file_path: string | null;
-        tracks: SourceTrack[] | null;
-      }>(
-        `SELECT ls.owner_id, lsb.media_type, lsb.file_path, lsb.tracks
-           FROM library_server_books lsb
-           JOIN library_servers ls ON ls.id = lsb.server_id
-          WHERE lsb.book_id = $1
-            AND (
-              ls.owner_id = $2
-              OR EXISTS (
-                SELECT 1 FROM library_server_grants g
-                WHERE g.collection_id = lsb.collection_id
-                  AND g.grantee_id = $2
-                  AND g.revoked_at IS NULL
-              )
-              OR EXISTS (
-                SELECT 1 FROM club_book_access cba
-                JOIN clubs c ON c.id = cba.club_id
-                WHERE cba.user_id = $2
-                  AND cba.book_id = lsb.book_id
-                  AND cba.revoked_at IS NULL
-                  AND (c.end_date IS NULL OR c.end_date > now())
-              )
-            )`,
-        [bookId, me]
-      );
+      const { data, error } = await callerClient(req).from('library_server_books')
+        .select('media_type,file_path,tracks,library_servers!inner(owner_id)')
+        .eq('book_id', bookId).eq('server_id', loadIdentity()?.serverId || '00000000-0000-0000-0000-000000000000')
+        .eq('media_type', 'audiobook');
+      if (error) throw error;
+      const sources: { owner_id: string; media_type: string; file_path: string | null; tracks: SourceTrack[] | null }[] = (data || []).map((row: any) => ({ ...row, owner_id: row.library_servers.owner_id }));
 
     if (sources.length === 0) {
       sendSuccess(res, { chapters: [] });
@@ -155,14 +133,8 @@ booksRouter.get(
 
     // ── Filesystem single-file (ffprobe -show_chapters) ──
     if (fs && fs.file_path) {
-      const root = path.resolve(scanPath);
-      const filePath = path.resolve(root, fs.file_path);
-      // Defense-in-depth: never let a malformed file_path escape the scan
-      // root. The scanner stores relative paths so this should always hold.
-      if (!filePath.startsWith(root)) {
-        sendSuccess(res, { chapters: [] });
-        return;
-      }
+      const filePath = containedPath(scanPath, fs.file_path);
+      if (!filePath) { sendSuccess(res, { chapters: [] }); return; }
       try {
         const probe = await ffprobeChapters(filePath);
         const raw = probe.chapters ?? [];

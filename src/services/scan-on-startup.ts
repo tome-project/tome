@@ -37,10 +37,11 @@ async function ensureCollections(
   collectionRels: string[],
 ): Promise<Map<string, string>> {
   const hub = hubClient();
-  const { data: existingRows } = await hub
+  const { data: existingRows, error: collectionError } = await hub
     .from('library_collections')
     .select('id, rel_path')
     .eq('server_id', serverId);
+  if(collectionError) throw collectionError;
   const existing = new Map<string, string>(
     ((existingRows as Array<{ id: string; rel_path: string }>) ?? []).map(
       (r) => [r.rel_path, r.id],
@@ -65,27 +66,32 @@ async function ensureCollections(
   return existing;
 }
 
-async function ensureCatalog(book: ScannedBook): Promise<CatalogBook> {
+export async function ensureCatalog(book: ScannedBook, serverId: string): Promise<CatalogBook> {
   const hub = hubClient();
+  // Preserve a hosted file's catalog identity, including titles without an author/ISBN.
+  const {data:bound,error:boundError}=await hub.from('library_server_books')
+    .select('book:books(*)').eq('server_id',serverId)
+    .eq('file_path',path.relative(libraryPath,book.absolutePath)).eq('media_type',book.mediaType)
+    .order('last_scanned_at',{ascending:true}).limit(1).maybeSingle();
+  if(boundError)throw boundError;
+  if(bound?.book)return bound.book as unknown as CatalogBook;
   const isbn = book.metadata.isbn?.replace(/[-\s]/g, '');
   if (isbn && isbn.length === 13) {
-    const { data } = await hub.from('books').select('*').eq('isbn_13', isbn).maybeSingle();
+    const { data,error:lookupError } = await hub.from('books').select('*').eq('isbn_13', isbn).limit(1).maybeSingle();
+    if(lookupError)throw lookupError;
     if (data) return data as CatalogBook;
   }
   if (isbn && isbn.length === 10) {
-    const { data } = await hub.from('books').select('*').eq('isbn_10', isbn).maybeSingle();
+    const { data,error:lookupError } = await hub.from('books').select('*').eq('isbn_10', isbn).limit(1).maybeSingle();
+    if(lookupError)throw lookupError;
     if (data) return data as CatalogBook;
   }
   const primary = book.metadata.authors[0];
-  if (primary) {
-    const { data } = await hub
-      .from('books')
-      .select('*')
-      .eq('title', book.metadata.title)
-      .contains('authors', [primary])
-      .maybeSingle();
-    if (data) return data as CatalogBook;
-  }
+  let titleQuery=hub.from('books').select('*').eq('title',book.metadata.title);
+  titleQuery=primary ? titleQuery.contains('authors',[primary]) : titleQuery.eq('authors','{}');
+  const {data:matching,error:matchError}=await titleQuery.limit(1).maybeSingle();
+  if(matchError)throw matchError;
+  if(matching)return matching as CatalogBook;
   const { data: inserted, error } = await hub
     .from('books')
     .insert({
@@ -182,7 +188,7 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
 
     const worker = async (book: typeof scan.books[number]) => {
       try {
-        const catalog = await ensureCatalog(book);
+        const catalog = await ensureCatalog(book, identity.serverId);
         seenBookIds.add(catalog.id);
         const filePath = path.relative(libraryPath, book.absolutePath);
         const collectionId = collectionByRel.get(book.collectionRel);
@@ -194,13 +200,15 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
           return;
         }
 
-        const { data: existing } = await hub
+        const { data: existing, error: lookupError } = await hub
           .from('library_server_books')
           .select('id')
           .eq('server_id', identity.serverId)
           .eq('book_id', catalog.id)
+          .eq('media_type', book.mediaType)
           .maybeSingle();
 
+        if (lookupError) throw lookupError;
         const payload = {
           server_id: identity.serverId,
           collection_id: collectionId,
@@ -212,10 +220,12 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
           last_scanned_at: new Date().toISOString(),
         };
         if (existing) {
-          await hub.from('library_server_books').update(payload).eq('id', existing.id);
+          const { error } = await hub.from('library_server_books').update(payload).eq('id', existing.id);
+          if (error) throw error;
           updated++;
         } else {
-          await hub.from('library_server_books').insert(payload);
+          const { error } = await hub.from('library_server_books').insert(payload);
+          if (error) throw error;
           added++;
         }
         // Fulfill pending whether this book was already known or newly
@@ -235,11 +245,6 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
             authors: catalog.authors ?? book.metadata.authors,
           });
         }
-
-        await hub.from('user_books').upsert(
-          { user_id: identity.ownerId, book_id: catalog.id, status: 'want', source: 'library_server' },
-          { onConflict: 'user_id,book_id', ignoreDuplicates: true },
-        );
 
         // Local-first cover image: ID3 embedded art, folder cover.jpg,
         // or EPUB cover (whatever the scanner could pull off disk).
@@ -305,19 +310,18 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
     // stay — the user might have rated/reviewed; just losing the file
     // doesn't mean losing the shelf entry.
     let pruned = 0;
-    try {
-      const { data: existingRows } = await hub
-        .from('library_server_books')
-        .select('id, book_id')
-        .eq('server_id', identity.serverId);
-      const stale = (existingRows ?? []).filter((r: { book_id: string }) => !seenBookIds.has(r.book_id));
-      if (stale.length > 0) {
-        const ids = stale.map((r: { id: string }) => r.id);
-        await hub.from('library_server_books').delete().in('id', ids);
+    // A failed decode/DB write is not evidence that a file was removed.
+    // Only prune physically missing files after a completely successful scan.
+    if (scan.errors.length === 0 && errors === 0) {
+      const { data: existingRows, error: inventoryError } = await hub
+        .from('library_server_books').select('id, file_path').eq('server_id', identity.serverId);
+      if (inventoryError) throw inventoryError;
+      const stale = (existingRows ?? []).filter(r => !fs.existsSync(path.resolve(libraryPath, r.file_path)));
+      if (stale.length) {
+        const { error } = await hub.from('library_server_books').delete().in('id', stale.map(r => r.id));
+        if (error) throw error;
         pruned = stale.length;
       }
-    } catch (err) {
-      console.error('[scan] prune step failed:', err);
     }
 
     // Match any still-pending requests against the whole library (covers
@@ -336,7 +340,7 @@ export async function runScanForOwner(): Promise<ScanSummary | null> {
       added,
       updated,
       pruned,
-      errors,
+      errors: errors + scan.errors.length,
       durationMs: Date.now() - startMs,
     };
     console.log(

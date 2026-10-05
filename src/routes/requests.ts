@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { requireSupabaseAuth } from '../middleware/supabase-auth';
-import { selectOne, selectMany, query } from '../services/db';
+import { callerClient } from '../services/caller-client';
+import { hubClient } from '../services/hub';
 import { sendSuccess, sendError } from '../utils';
 import {
   detectSeries,
@@ -75,11 +76,10 @@ requestsRouter.get(
 
     let book: BookRow | null;
     try {
-      book = await selectOne<BookRow>(
-        `SELECT id, title, authors, isbn_13, series_name, series_position, series_lookup_attempted_at
-           FROM books WHERE id = $1`,
-        [bookId],
-      );
+      const { data, error } = await callerClient(req).from('books').select('*').eq('id', bookId).maybeSingle();
+      if (error) throw error;
+      book = data;
+
     } catch (err) {
       sendError(res, err instanceof Error ? err.message : 'Lookup failed', 500);
       return;
@@ -95,14 +95,8 @@ requestsRouter.get(
     if (!book.series_lookup_attempted_at) {
       try {
         const detected = await detectSeries(book.title, book.authors, book.isbn_13);
-        await query(
-          `UPDATE books
-              SET series_name = $1,
-                  series_position = $2,
-                  series_lookup_attempted_at = now()
-            WHERE id = $3`,
-          [detected?.name ?? null, detected?.position ?? null, bookId],
-        );
+        await hubClient().from('books').update({ series_name: detected?.name ?? null,
+          series_position: detected?.position ?? null, series_lookup_attempted_at: new Date().toISOString() }).eq('id', bookId);
         book.series_name = detected?.name ?? null;
         book.series_position = detected?.position ?? null;
       } catch (err) {
@@ -156,12 +150,11 @@ requestsRouter.get(
     // batched by isbn_13 (the strongest signal); a second pass tries
     // (title, first author) for anything that didn't isbn-match.
     const isbns = filtered.map((c) => c.isbn_13).filter((x): x is string => !!x);
-    const isbnMatches = isbns.length > 0
-      ? await selectMany<CatalogMatch>(
-          `SELECT id, isbn_13, title, authors FROM books WHERE isbn_13 = ANY($1::text[])`,
-          [isbns],
-        )
-      : [];
+    const { data: isbnRows, error: isbnError } = isbns.length > 0
+      ? await callerClient(req).from('books').select('id,isbn_13,title,authors').in('isbn_13', isbns)
+      : { data: [], error: null };
+    if (isbnError) { sendError(res, 'Catalog unavailable', 503); return; }
+    const isbnMatches = (isbnRows || []) as CatalogMatch[];
     const isbnMap = new Map(isbnMatches.map((r) => [r.isbn_13!, r.id]));
 
     // For candidates without isbn matches, try (title, first_author).
@@ -174,13 +167,10 @@ requestsRouter.get(
 
     let titleMap = new Map<string, string>();
     if (titleAuthorPairs.length > 0) {
-      const rows = await selectMany<CatalogMatch>(
-        `SELECT id, isbn_13, title, authors
-           FROM books
-          WHERE LOWER(title) = ANY($1::text[])
-            AND array_length(authors, 1) > 0`,
-        [titleAuthorPairs.map((p) => p.title.toLowerCase())],
-      );
+      const { data: titleRows, error } = await callerClient(req).from('books')
+        .select('id,isbn_13,title,authors').in('title', titleAuthorPairs.map(p => p.title));
+      if (error) { sendError(res, 'Catalog unavailable', 503); return; }
+      const rows = (titleRows || []) as CatalogMatch[];
       for (const r of rows) {
         const a = r.authors[0] ?? '';
         titleMap.set(tplKey(r.title, a), r.id);
@@ -206,28 +196,10 @@ requestsRouter.get(
 
     let availabilityByBook = new Map<string, AvailableOn[]>();
     if (matchedBookIds.size > 0) {
-      const rows = await selectMany<{
-        book_id: string;
-        server_id: string;
-        owner_id: string;
-        display_name: string | null;
-      }>(
-        `SELECT lsb.book_id, ls.id AS server_id, ls.owner_id, up.display_name
-           FROM library_server_books lsb
-           JOIN library_servers ls ON ls.id = lsb.server_id
-      LEFT JOIN user_profiles up ON up.user_id = ls.owner_id
-          WHERE lsb.book_id = ANY($1::uuid[])
-            AND (
-              ls.owner_id = $2
-              OR EXISTS (
-                SELECT 1 FROM library_server_grants g
-                WHERE g.collection_id = lsb.collection_id
-                  AND g.grantee_id = $2
-                  AND g.revoked_at IS NULL
-              )
-            )`,
-        [Array.from(matchedBookIds), me],
-      );
+      const { data: hosted, error } = await callerClient(req).from('library_server_books')
+        .select('book_id,server_id,library_servers!inner(owner_id)').in('book_id', Array.from(matchedBookIds));
+      if (error) { sendError(res, 'Libraries unavailable', 503); return; }
+      const rows = (hosted || []).map((r: any) => ({ ...r, owner_id: r.library_servers.owner_id, display_name: null }));
       for (const r of rows) {
         const list = availabilityByBook.get(r.book_id) ?? [];
         list.push({

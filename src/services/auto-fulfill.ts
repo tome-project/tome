@@ -49,12 +49,12 @@ export async function autoFulfillRequests(params: {
         .eq('server_id', params.serverId)
         .eq('status', 'pending')
         .eq(filter.column, filter.value)
-        .select('id');
+        .select('id,status');
       if (error) {
         console.error(`[auto-fulfill] ${filter.column} match failed:`, error);
         return;
       }
-      fulfilled += (data ?? []).length;
+      fulfilled += (data ?? []).filter(row=>row.status==='fulfilled').length;
     } catch (err) {
       console.error(`[auto-fulfill] ${filter.column} match threw:`, err);
     }
@@ -100,11 +100,11 @@ export async function autoFulfillRequests(params: {
             .update(patch)
             .in('id', ids)
             .eq('status', 'pending')
-            .select('id');
+            .select('id,status');
           if (upErr) {
             console.error('[auto-fulfill] title fulfill failed:', upErr);
           } else {
-            fulfilled += (data ?? []).length;
+            fulfilled += (data ?? []).filter(row=>row.status==='fulfilled').length;
           }
         }
       }
@@ -247,7 +247,7 @@ export async function reconcilePendingRequests(
       })
       .eq('id', req.id)
       .eq('status', 'pending')
-      .select('id');
+      .select('id,status');
     if (signal) fulfillQuery = fulfillQuery.abortSignal(signal);
     const { data, error } = await fulfillQuery;
     if (error) {
@@ -255,8 +255,9 @@ export async function reconcilePendingRequests(
       if (signal) throw new Error(error.message);
       continue;
     }
-    if (data?.length) {
-      fulfilled += data.length;
+    const ready=(data ?? []).filter(row=>row.status==='fulfilled');
+    if (ready.length) {
+      fulfilled += ready.length;
       console.log(
         `[auto-fulfill] reconciled request "${req.title}" → book ${match.id}`,
       );

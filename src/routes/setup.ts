@@ -2,8 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import { Router, Request, Response } from 'express';
 import { hubClient, hubConfigured, isHubMode, hubBaseUrl } from '../services/hub';
-import { isPaired, loadIdentity } from '../services/server-identity';
+import { isPaired, loadIdentity, clearIdentity } from '../services/server-identity';
 import { scanState, runScanForOwner } from '../services/scan-on-startup';
+
+import { requireSetupAdmin } from '../middleware/setup-admin';
+import { stopHeartbeat } from '../services/heartbeat';
+import { resetHubClient } from '../services/hub';
 
 export const setupRouter = Router();
 
@@ -217,7 +221,7 @@ setupRouter.get(['/', '/setup'], async (_req: Request, res: Response) => {
 
 /// POST /setup/scan — kicks off a manual scan from the wizard. Returns
 /// to /setup so the user can see live status updates.
-setupRouter.post('/setup/scan', async (_req: Request, res: Response) => {
+setupRouter.post('/setup/scan', requireSetupAdmin, async (_req: Request, res: Response) => {
   res.type('html');
   if (!isPaired()) {
     res.redirect(303, '/setup');
@@ -232,18 +236,13 @@ setupRouter.post('/setup/scan', async (_req: Request, res: Response) => {
 /// so the next /setup hit shows the pair-code form. The library_servers
 /// row in the hub stays; the owner can clean it up from the app's My
 /// Libraries screen.
-setupRouter.post('/setup/reset', async (_req: Request, res: Response) => {
+setupRouter.post('/setup/reset', requireSetupAdmin, async (_req: Request, res: Response) => {
   res.type('html');
-  const libraryPath = process.env.LIBRARY_PATH || './library';
-  try {
-    fs.unlinkSync(path.join(libraryPath, '.tome-server.json'));
-  } catch {
-    // already gone
-  }
-  // Identity cache is module-level; we'd need to restart for it to
-  // re-read. Tell the operator.
+  stopHeartbeat();
+  clearIdentity();
+  resetHubClient();
   res.send(renderShell('Pairing reset', `
-  <p class="lede">Pairing reset. <strong>Restart the server</strong>
+  <p class="lede">Pairing reset. You can now pair this server again. <strong>Restart the server if changing configuration</strong>
     (e.g. <code>docker compose restart server</code>) for the change
     to take effect, then refresh this page to pair to a new account.</p>
   <p class="footnote">Pre-existing books on disk stay; the heartbeat
@@ -265,12 +264,13 @@ setupRouter.post('/setup', async (req: Request, res: Response) => {
   // are mounted on the same app, hit it via internal fetch — or simpler,
   // just call the helper directly. For now, post to ourselves.
   try {
-    const proto = (req.headers['x-forwarded-proto'] as string) ?? req.protocol;
-    const host = (req.headers['x-forwarded-host'] as string) ?? req.get('host');
+    const proto = 'http';
+    const host = `127.0.0.1:${process.env.PORT || 3000}`;
     const r = await fetch(`${proto}://${host}/pair`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, name }),
+      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({ code, name, publicUrl: process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}` }),
     });
     const j = await r.json();
     if (!r.ok || !(j as { success?: boolean }).success) {

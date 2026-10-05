@@ -99,7 +99,7 @@ test('successful reconciliation preserves match and conditional fulfillment', as
   const requests = [];
   hub.hubClient = () => fakeClient(async (url, options) => {
     requests.push({ url: String(url), method: options.method, body: options.body });
-    if (options.method === 'PATCH') return json([{ id: 'request' }]);
+    if (options.method === 'PATCH') return json([{ id: 'request',status:'fulfilled' }]);
     if (String(url).includes('library_server_books')) return json([{ book_id: 'book', books: { id: 'book', title: 'Fixture', authors: [], isbn_13: '123' } }]);
     return json([{ id: 'request', title: 'Fixture', authors: [], isbn_13: '123' }]);
   });
@@ -107,6 +107,15 @@ test('successful reconciliation preserves match and conditional fulfillment', as
   const update = requests.find(x => x.method === 'PATCH');
   assert.ok(update.url.includes('status=eq.pending'));
   assert.equal(JSON.parse(update.body).fulfilled_book_id, 'book');
+});
+
+test('reconciliation does not announce a request rejected by the availability guard',async()=>{
+  hub.hubClient=()=>fakeClient(async(url,options)=>{
+    if(options.method==='PATCH')return json([{id:'request',status:'pending'}]);
+    if(String(url).includes('library_server_books'))return json([{book_id:'book',books:{id:'book',title:'Fixture',authors:[],isbn_13:'123'}}]);
+    return json([{id:'request',title:'Fixture',authors:[],isbn_13:'123'}]);
+  });
+  assert.deepEqual(await reconcilePendingRequests('server',new AbortController().signal),{checked:1,fulfilled:0});
 });
 
 test('heartbeat preserves target and auth retry, and propagates deadline failure', async () => {
@@ -226,7 +235,8 @@ test('deployment skip flag suppresses only the boot scan and retains background 
       './services/identity-check': { verifyIdentityOrUnpair: async () => true },
       './services/hub': { isHubMode: () => true, hubConfigured: () => true, initHubClient: async () => {} },
       './services/auto-fulfill': {},
-      './services/background-job': { startBackgroundJob: () => { jobs++; } },
+      './services/push-notifications': { startPushNotifications() {} },
+      './services/background-job': { startBackgroundJob: options => { jobs++; if(options.immediate) void options.run(new AbortController().signal); } },
     };
     vm.runInNewContext(fs.readFileSync(require.resolve('../dist/index'), 'utf8'), {
       require: name => { assert.ok(name in stubs, name); return stubs[name]; },
@@ -235,6 +245,6 @@ test('deployment skip flag suppresses only the boot scan and retains background 
     });
     await flush();
     assert.equal(scans, skip === '1' ? 0 : 1);
-    assert.equal(heartbeats, 1); assert.equal(jobs, 1);
+    assert.equal(heartbeats, 1); assert.equal(jobs, 2);
   }
 });

@@ -42,10 +42,21 @@ export function loadIdentity(): ServerIdentity | null {
 
 export function saveIdentity(id: ServerIdentity): void {
   fs.mkdirSync(libraryPath, { recursive: true });
-  fs.writeFileSync(identityFile, JSON.stringify(id, null, 2), 'utf-8');
+  fs.writeFileSync(identityFile, JSON.stringify(id, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(identityFile, 0o600);
   _cached = id;
 }
 
 export function isPaired(): boolean {
   return loadIdentity() !== null;
+}
+
+export function clearIdentity(): void {
+  fs.rmSync(identityFile, { force: true });
+  _cached = null;
+}
+export function publicIdentity(): Omit<ServerIdentity, 'supabaseEmail' | 'supabasePassword' | 'supabaseUrl'> | null {
+  const id = loadIdentity();
+  if (!id) return null;
+  return { serverId: id.serverId, ownerId: id.ownerId, serverName: id.serverName, pairedAt: id.pairedAt };
 }

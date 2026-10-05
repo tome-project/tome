@@ -129,7 +129,7 @@ async function* walkBookFiles(root: string): AsyncGenerator<DiscoveryYield> {
   }
 
   // Recurse
-  const subdirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'));
+  const subdirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && !['covers', 'club-shares'].includes(e.name));
   for (const sub of subdirs) {
     yield* walkBookFiles(path.join(root, sub.name));
   }
@@ -163,7 +163,7 @@ function runFfprobe(filePath: string): Promise<FfprobeOutput> {
       '-show_chapters',
       filePath,
     ];
-    const child = spawn('ffprobe', args);
+    const child = spawn('ffprobe', args, { timeout: 30_000 });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (c) => { stdout += c; });
@@ -188,7 +188,7 @@ function runFfprobe(filePath: string): Promise<FfprobeOutput> {
 function extractAudiobookCover(filePath: string): Promise<Buffer | null> {
   return new Promise((resolve) => {
     const args = ['-v', 'error', '-i', filePath, '-an', '-vcodec', 'copy', '-f', 'image2pipe', 'pipe:1'];
-    const child = spawn('ffmpeg', args);
+    const child = spawn('ffmpeg', args, { timeout: 30_000 });
     const chunks: Buffer[] = [];
     child.stdout.on('data', (c: Buffer) => chunks.push(c));
     child.on('close', (code) => {
@@ -531,6 +531,22 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
     throw new Error(`Library root is not a directory: ${root}`);
   }
 
+  const cacheFile = path.join(root, '.tome-scan-cache-v1.json');
+  let previous: Record<string, any> = {};
+  try { previous = JSON.parse(await fsp.readFile(cacheFile, 'utf8')); } catch { /* first scan or invalid cache */ }
+  const nextCache: Record<string, any> = {};
+  const signatureFor = async (paths: string[]) => JSON.stringify(await Promise.all(paths.map(async p => {
+    const st = await fsp.stat(p); return [path.relative(root,p),st.size,st.mtimeMs];
+  })));
+  const reuse = (key: string, signature: string): ScannedBook | null => {
+    const row = previous[key];
+    if (!row || row.signature !== signature) return null;
+    nextCache[key] = row;
+    return { ...row.book, mtime: new Date(row.book.mtime), coverImage: row.book.coverImage ? Buffer.from(row.book.coverImage,'base64') : null };
+  };
+  const remember = (book: ScannedBook, signature: string) => {
+    nextCache[book.relativePath] = {signature,book:{...book,coverImage:book.coverImage?.toString('base64') || null}};
+  };
   const books: ScannedBook[] = [];
   const errors: Array<{ path: string; error: string }> = [];
   const skipped: Array<{ path: string; reason: string }> = [];
@@ -603,6 +619,9 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
 
     if (item.kind === 'audiobook-multi') {
       try {
+        const signature = await signatureFor([item.dirPath,...item.trackPaths]);
+        const reused = reuse(path.relative(root,item.dirPath),signature);
+        if (reused) { books.push(reused); continue; }
         const dirStat = await fsp.stat(item.dirPath);
         const { metadata, coverImage, tracks, totalSize } = await scanAudiobookMulti(
           item.dirPath,
@@ -621,6 +640,7 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
           tracks,
           collectionRel: collectionRelOf(relativePath),
         });
+        remember(books[books.length-1],signature);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         errors.push({ path: item.dirPath, error: message });
@@ -631,11 +651,14 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
     // Single file (m4b / m4a / mp3 / epub)
     const filePath = item.path;
     try {
+      const signature = await signatureFor([filePath]);
+      const reused = reuse(path.relative(root,filePath),signature);
+      if (reused) { books.push(reused); continue; }
       const fileStat = await fsp.stat(filePath);
       const ext = path.extname(filePath).toLowerCase();
       const mediaType: 'audiobook' | 'epub' = AUDIOBOOK_EXTS.has(ext) ? 'audiobook' : 'epub';
 
-      if (mediaType === 'audiobook' && (ext === '.m4a' || ext === '.m4b')) {
+      if (process.env.TOME_OPTIMIZE_ORIGINALS === '1' && mediaType === 'audiobook' && (ext === '.m4a' || ext === '.m4b')) {
         await ensureAudiobookFastStart(filePath);
       }
 
@@ -657,6 +680,7 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
         tracks: null,
         collectionRel: collectionRelOf(relativePath),
       });
+      remember(books[books.length-1],signature);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       errors.push({ path: filePath, error: message });
@@ -667,5 +691,9 @@ export async function scanLibrary(rootPath: string): Promise<ScanResult> {
     new Set(books.map((b) => b.collectionRel)),
   ).sort();
 
+  try {
+    await fsp.writeFile(`${cacheFile}.tmp`,JSON.stringify(nextCache),{mode:0o600});
+    await fsp.rename(`${cacheFile}.tmp`,cacheFile);
+  } catch (error) { console.warn('[scan] metadata cache unavailable'); }
   return { rootPath: root, books, errors, skipped, collectionRels };
 }

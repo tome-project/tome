@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import jwksClient from 'jwks-rsa';
 import { hubClient } from '../services/hub';
+import { callerClient } from '../services/caller-client';
 import { loadIdentity } from '../services/server-identity';
 
 declare global {
@@ -71,7 +72,7 @@ export function requireSupabaseAuth(
     return;
   }
   const token = auth.slice('Bearer '.length);
-  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseUrl = process.env.SUPABASE_URL || loadIdentity()?.supabaseUrl || 'https://zflawbkznckwlutlcgjh.supabase.co';
   if (!supabaseUrl) {
     res.status(500).json({ success: false, error: 'Library server not paired (no SUPABASE_URL)' });
     return;
@@ -79,7 +80,7 @@ export function requireSupabaseAuth(
   jwt.verify(
     token,
     getKey(supabaseUrl),
-    { algorithms: ['RS256', 'ES256'] },
+    { algorithms: ['RS256', 'ES256'], issuer: `${supabaseUrl}/auth/v1`, audience: 'authenticated' },
     (err, decoded) => {
       if (err || !decoded || typeof decoded === 'string') {
         res.status(401).json({ success: false, error: 'Invalid token' });
@@ -146,10 +147,11 @@ export async function requireLibraryAccess(
       // a handful) and let the file handler's library_server_books
       // lookup do the per-server narrowing — it already does that today
       // by querying with `server_id = identity.serverId`.
-      hubClient()
+      callerClient(req)
         .from('club_book_access')
-        .select('book_id, clubs!inner(end_date)')
+        .select('book_id, clubs!inner(end_date,host_id)')
         .eq('user_id', userId)
+        .eq('clubs.host_id', identity.ownerId)
         .is('revoked_at', null),
     ]);
     if (collectionsResult.error) throw collectionsResult.error;

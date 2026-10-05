@@ -30,6 +30,7 @@ import { startHeartbeat } from './services/heartbeat';
 import { verifyIdentityOrUnpair } from './services/identity-check';
 import { initHubClient, isHubMode, hubConfigured } from './services/hub';
 import { reconcilePendingRequests } from './services/auto-fulfill';
+import { startPushNotifications } from './services/push-notifications';
 import { startBackgroundJob } from './services/background-job';
 
 const app = express();
@@ -84,10 +85,11 @@ app.use(scannerRouter);   // POST /scan → trigger a library scan (manual)
 app.use(booksRouter);     // GET /api/v1/books/:id/chapters
 app.use(requestsRouter);  // GET /api/v1/books/:id/next-in-series → series-aware "what's next" → audiobook chapters
 app.use(bookRequestsRouter); // GET /api/v1/requests/pending → owner/agent acquisition queue
-app.use(clubFilesRouter); // POST/GET/DELETE /api/v1/clubs/:clubId/file → transient host-shared file for clubs
+if (isHubMode()) app.use(clubFilesRouter); // POST/GET/DELETE /api/v1/clubs/:clubId/file → transient host-shared file for clubs
 
 app.use(errorHandler);
 
+let backgroundStarted = false;
 app.listen(port, () => {
   console.log(`Tome library server running on port ${port}`);
   if (isHubMode()) {
@@ -112,19 +114,22 @@ app.listen(port, () => {
   //   2. If still paired, start the heartbeat ticker so the app shows
   //      this server as online.
   //   3. Kick off an auto-scan to catch any disk changes since last boot.
-  void (async () => {
+  startBackgroundJob({
+    name: 'initialize', intervalMs: 30_000, immediate: true, timeoutMs: 120_000,
+    run: async (signal) => {
+    if (backgroundStarted) return;
     if (!hubConfigured()) {
       console.log('Server is not paired yet — visit /setup to pair.');
       return;
     }
     try {
-      await initHubClient();
+      await initHubClient(signal);
     } catch (err) {
       console.error(
         '[boot] failed to initialize Supabase session:',
         err instanceof Error ? err.message : err,
       );
-      return;
+      throw err;
     }
     if (!loadIdentity()) {
       console.log('Server is not paired yet — skipping background tasks.');
@@ -136,6 +141,7 @@ app.listen(port, () => {
       return;
     }
     startHeartbeat();
+    startPushNotifications();
     try {
       if (process.env.TOME_SKIP_STARTUP_SCAN === '1') {
         console.log('[startup-scan] skipped by deployment configuration');
@@ -163,7 +169,9 @@ app.listen(port, () => {
     console.log(
       `[reconcile] matching pending requests to library every ${RECONCILE_MS / 1000}s`,
     );
-  })();
+    backgroundStarted = true;
+    },
+  });
 });
 
 export default app;

@@ -65,7 +65,7 @@ async function moovPrecedesMdat(filePath: string): Promise<boolean> {
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', args, { stdio: 'ignore' });
+    const child = spawn('ffmpeg', args, { stdio: 'ignore', timeout: 120_000 });
     child.on('error', reject);
     child.on('close', (code) => {
       if (code === 0) resolve();

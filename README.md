@@ -1,5 +1,7 @@
 # Tome
 
+
+Current architecture, deployment, health checks, scanning, and recovery: [Reliability and operations](docs/reliability-and-operations.md).
 > **Plex for books.** A self-hosted ebook and audiobook platform with book club features.
 
 Tome runs on your hardware, scans your existing library on disk, and serves it to a Flutter mobile app on iOS, Android, and the web. Invite friends and family with a one-tap code, read or listen across devices with synced progress, and run book clubs around a single book with chapter-by-chapter, spoiler-safe discussions.

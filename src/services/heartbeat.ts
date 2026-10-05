@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from '../version';
 import os from 'os';
 import { hubClient, resetHubClient, initHubClient } from './hub';
 import { loadIdentity } from './server-identity';
@@ -40,7 +41,7 @@ async function _tick(signal: AbortSignal): Promise<void> {
       .update({
         last_seen_at: new Date().toISOString(),
         platform: process.platform,
-        version: process.env.npm_package_version || '0.7.0',
+        version: SERVER_VERSION,
       })
       .eq('id', identity.serverId)
       .abortSignal(signal);

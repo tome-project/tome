@@ -15,6 +15,7 @@ if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
 /// is on a different server, or the scanner didn't extract a cover).
 coversRouter.get('/covers/:bookId', (req: Request, res: Response) => {
   const bookId = String(req.params.bookId);
+  if (!/^[0-9a-f-]{36}$/i.test(bookId)) { res.status(400).end(); return; }
   const coverPath = path.join(coversDir, `${bookId}.jpg`);
   if (!fs.existsSync(coverPath)) {
     res.status(404).json({ success: false, error: 'Cover not found' });

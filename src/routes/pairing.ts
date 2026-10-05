@@ -1,3 +1,4 @@
+import { SERVER_VERSION } from '../version';
 import { Router, Request, Response } from 'express';
 import {
   hubClient,
@@ -9,6 +10,7 @@ import {
 } from '../services/hub';
 import {
   saveIdentity,
+  publicIdentity,
   isPaired,
   loadIdentity,
 } from '../services/server-identity';
@@ -51,7 +53,7 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
   if (isPaired()) {
     res.status(200).json({
       success: true,
-      data: { paired: true, identity: loadIdentity() },
+      data: { paired: true, identity: publicIdentity() },
     });
     return;
   }
@@ -90,7 +92,7 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
         name,
         url,
         platform: process.platform,
-        version: process.env.npm_package_version || '0.7.0',
+        version: SERVER_VERSION,
       });
     } else {
       // Self-host mode: ask the hub.
@@ -98,12 +100,13 @@ pairingRouter.post('/pair', async (req: Request, res: Response) => {
       const r = await fetch(`${hubUrl}/api/v1/hub/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15_000),
         body: JSON.stringify({
           code,
           name,
           public_url: url,
           platform: process.platform,
-          version: process.env.npm_package_version || '0.7.0',
+          version: SERVER_VERSION,
         }),
       });
       const j = (await r.json()) as { success?: boolean; data?: PairResult; error?: string };

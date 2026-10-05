@@ -2,8 +2,9 @@ import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { requireAuth } from '../middleware/auth';
-import { selectOne, upsertOne, query } from '../services/db';
+import { requireSupabaseAuth as requireAuth } from '../middleware/supabase-auth';
+import { hubClient } from '../services/hub';
+import { streamFile, containedPath } from '../services/file-stream';
 import { sendSuccess, sendError } from '../utils';
 
 /// club-files — transient host-shared files for book clubs.
@@ -52,22 +53,15 @@ interface ClubRow {
 }
 
 async function loadClubAsHost(clubId: string, userId: string): Promise<ClubRow | null> {
-  return selectOne<ClubRow>(
-    `SELECT id, host_id, book_id, end_date
-       FROM clubs
-      WHERE id = $1 AND host_id = $2`,
-    [clubId, userId],
-  );
+  const {data,error} = await hubClient().from('clubs').select('id,host_id,book_id,end_date').eq('id',clubId).eq('host_id',userId).maybeSingle();
+  if(error) throw error;
+  return data;
 }
 
 async function userIsClubMember(clubId: string, userId: string): Promise<boolean> {
-  const row = await selectOne<{ ok: number }>(
-    `SELECT 1 AS ok
-       FROM club_members
-      WHERE club_id = $1 AND user_id = $2`,
-    [clubId, userId],
-  );
-  return !!row;
+  const {data,error} = await hubClient().from('club_members').select('user_id').eq('club_id',clubId).eq('user_id',userId).maybeSingle();
+  if(error) throw error;
+  return !!data;
 }
 
 // Multer wiring: we don't know book_id until req.body parses, but multer
@@ -77,7 +71,7 @@ async function userIsClubMember(clubId: string, userId: string): Promise<boolean
 const storage = multer.diskStorage({
   destination: async (req, _file, cb) => {
     const clubId = String(req.params.clubId);
-    if (!clubId) {
+    if (!/^[0-9a-f-]{36}$/i.test(clubId)) {
       cb(new Error('Missing clubId'), '');
       return;
     }
@@ -124,6 +118,8 @@ function runUpload(req: Request, res: Response, next: NextFunction) {
   });
 }
 
+const guarded = (handler: (req: Request, res: Response) => Promise<void>) =>
+  (req: Request, res: Response, next: NextFunction) => { void handler(req,res).catch(next); };
 export const clubFilesRouter = Router();
 
 // POST /api/v1/clubs/:clubId/file
@@ -133,8 +129,8 @@ clubFilesRouter.post(
   '/api/v1/clubs/:clubId/file',
   requireAuth,
   runUpload,
-  async (req: Request, res: Response) => {
-    const me = req.userId!;
+  guarded(async (req: Request, res: Response) => {
+    const me = req.supabaseUserId!;
     const clubId = String(req.params.clubId);
     const file = req.file;
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -191,8 +187,7 @@ clubFilesRouter.post(
       : null;
 
     try {
-      const row = await upsertOne(
-        'club_files',
+      const {data: row,error} = await hubClient().from('club_files').upsert(
         {
           club_id: clubId,
           book_id: bookId,
@@ -204,14 +199,15 @@ clubFilesRouter.post(
           purged_at: null,
         },
         { onConflict: 'club_id,book_id' },
-      );
+      ).select().single();
+      if(error) throw error;
       sendSuccess(res, { file: row }, 201);
     } catch (dbErr) {
       // DB write failed — drop the bytes so we don't orphan storage.
       await fs.promises.unlink(finalPath).catch(() => {});
       sendError(res, dbErr instanceof Error ? dbErr.message : 'club_files upsert failed', 500);
     }
-  },
+  }),
 );
 
 // GET /api/v1/clubs/:clubId/file
@@ -219,8 +215,8 @@ clubFilesRouter.post(
 clubFilesRouter.get(
   '/api/v1/clubs/:clubId/file',
   requireAuth,
-  async (req: Request, res: Response) => {
-    const me = req.userId!;
+  guarded(async (req: Request, res: Response) => {
+    const me = req.supabaseUserId!;
     const clubId = String(req.params.clubId);
 
     if (!(await userIsClubMember(clubId, me))) {
@@ -228,17 +224,8 @@ clubFilesRouter.get(
       return;
     }
 
-    const row = await selectOne<{
-      book_id: string;
-      file_ext: string;
-      media_type: string;
-      purged_at: string | null;
-    }>(
-      `SELECT book_id, file_ext, media_type, purged_at
-         FROM club_files
-        WHERE club_id = $1`,
-      [clubId],
-    );
+    const {data:row,error} = await hubClient().from('club_files').select('*').eq('club_id',clubId).maybeSingle();
+    if(error) throw error;
     if (!row) {
       sendError(res, 'No file shared in this club yet', 404);
       return;
@@ -255,32 +242,8 @@ clubFilesRouter.get(
       return;
     }
 
-    const stat = fs.statSync(filePath);
-    const contentType = MIME_TYPES[row.file_ext] || 'application/octet-stream';
-    const rangeHeader = req.headers.range;
-
-    if (rangeHeader && row.media_type === 'audiobook') {
-      const parts = rangeHeader.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-      const chunkSize = end - start + 1;
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': contentType,
-      });
-      fs.createReadStream(filePath, { start, end }).pipe(res);
-      return;
-    }
-
-    res.writeHead(200, {
-      'Content-Length': stat.size,
-      'Content-Type': contentType,
-      'Content-Disposition': `inline; filename="${path.basename(filePath)}"`,
-    });
-    fs.createReadStream(filePath).pipe(res);
-  },
+    streamFile(req,res,filePath,MIME_TYPES[row.file_ext] || 'application/octet-stream');
+  }),
 );
 
 // DELETE /api/v1/clubs/:clubId/file
@@ -289,8 +252,8 @@ clubFilesRouter.get(
 clubFilesRouter.delete(
   '/api/v1/clubs/:clubId/file',
   requireAuth,
-  async (req: Request, res: Response) => {
-    const me = req.userId!;
+  guarded(async (req: Request, res: Response) => {
+    const me = req.supabaseUserId!;
     const clubId = String(req.params.clubId);
     const club = await loadClubAsHost(clubId, me);
     if (!club) {
@@ -298,10 +261,8 @@ clubFilesRouter.delete(
       return;
     }
 
-    const row = await selectOne<{ book_id: string; file_ext: string }>(
-      `SELECT book_id, file_ext FROM club_files WHERE club_id = $1`,
-      [clubId],
-    );
+    const {data:row,error} = await hubClient().from('club_files').select('book_id,file_ext').eq('club_id',clubId).maybeSingle();
+    if(error) throw error;
     if (!row) {
       sendSuccess(res, { deleted: false }, 200);
       return;
@@ -309,7 +270,8 @@ clubFilesRouter.delete(
 
     const filePath = path.join(clubSharesDir, clubId, `${row.book_id}${row.file_ext}`);
     await fs.promises.unlink(filePath).catch(() => {});
-    await query('DELETE FROM club_files WHERE club_id = $1', [clubId]);
+    const {error:deleteError} = await hubClient().from('club_files').delete().eq('club_id',clubId);
+    if(deleteError) throw deleteError;
     sendSuccess(res, { deleted: true }, 200);
-  },
+  }),
 );

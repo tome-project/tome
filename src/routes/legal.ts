@@ -80,6 +80,8 @@ const PRIVACY_BODY = `
   <li><strong>Diagnostic data:</strong> standard server logs (IP address, request path, timestamp) retained for up to 30 days for abuse prevention and debugging.</li>
 </ul>
 
+<h2>Optional book request alerts</h2>
+<p>If you enable book request alerts, Tome stores an app installation notification token linked to your account and uses Google Firebase Cloud Messaging and Apple Push Notification service to deliver alerts. These services receive the delivery identifier and the requested book title in the notification. Notification identifiers are used for app functionality, not advertising or tracking. You can disable notifications in your device settings; account deletion removes the stored device tokens.</p>
 <h2>What we don’t collect</h2>
 <ul>
   <li>We do not run third-party analytics or advertising SDKs.</li>

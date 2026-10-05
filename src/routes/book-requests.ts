@@ -243,7 +243,7 @@ bookRequestsRouter.post(
         .eq('id', id)
         .eq('server_id', gate.serverId)
         .eq('status', 'pending')
-        .select('id')
+        .select('id,status')
         .maybeSingle();
 
       if (error) {
@@ -252,6 +252,10 @@ bookRequestsRouter.post(
       }
       if (!data) {
         sendError(res, 'Pending request not found', 404);
+        return;
+      }
+      if (data.status !== 'fulfilled') {
+        sendError(res, 'Requested format is not yet accessible to this reader', 409);
         return;
       }
       sendSuccess(res, { id: data.id, status: 'fulfilled' });

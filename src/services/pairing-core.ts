@@ -43,18 +43,10 @@ export async function mintLibraryServer(args: {
 }): Promise<PairResult> {
   const { hub, supabaseUrl, code, name, url, platform, version } = args;
 
-  // 1. Validate pairing code.
-  const { data: pairing, error: lookupErr } = await hub
-    .from('library_server_pairings')
-    .select('*')
-    .eq('code', code)
-    .maybeSingle();
+  // Claim atomically: concurrent calls cannot mint multiple machines from one code.
+  const { data: pairing, error: lookupErr } = await hub.rpc('claim_pairing_code', { p_code: code });
   if (lookupErr) throw lookupErr;
   if (!pairing) throw new Error('No pairing for that code');
-  if (pairing.consumed_at) throw new Error('Code already used');
-  if (new Date(pairing.expires_at) < new Date()) {
-    throw new Error('Code expired — generate a new one in the app');
-  }
 
   // 2. Create the per-server auth user. Password isn't user-facing — it
   //    lives on the library server's disk only. We enable email_confirm
@@ -75,6 +67,8 @@ export async function mintLibraryServer(args: {
     user_metadata: { kind: 'library_server' },
   });
   if (authErr || !authData.user) {
+    await hub.from('library_server_pairings').update({claim_token:null,claimed_at:null})
+      .eq('code',code).eq('claim_token',pairing.claim_token).is('consumed_at',null);
     throw authErr ?? new Error('Failed to create library server service user');
   }
   const serviceUserId = authData.user.id;
@@ -101,13 +95,14 @@ export async function mintLibraryServer(args: {
     if (insertErr) throw insertErr;
 
     // 5. Mark pairing consumed.
-    await hub
+    const { error: consumeErr } = await hub
       .from('library_server_pairings')
       .update({
         consumed_at: new Date().toISOString(),
         consumed_by_server_id: server.id,
       })
-      .eq('code', code);
+      .eq('code', code).eq('claim_token', pairing.claim_token);
+    if (consumeErr) throw consumeErr;
 
     return {
       server_id: server.id,
@@ -125,6 +120,8 @@ export async function mintLibraryServer(args: {
     } catch (cleanupErr) {
       console.error('[mintLibraryServer] failed to clean up auth user', cleanupErr);
     }
+    await hub.from('library_server_pairings').update({ claim_token: null, claimed_at: null })
+      .eq('code', code).eq('claim_token', pairing.claim_token).is('consumed_at', null);
     throw err;
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "tome-server",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Tome — self-hosted ebook and audiobook platform server",
   "main": "dist/index.js",
   "scripts": {
@@ -8,27 +8,30 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "eslint src/",
-    "test": "npm run build && node --test test/background-job.test.cjs"
+    "test": "npm run build && node --test test/*.test.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",
+    "@types/yauzl": "^3.4.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.9.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "epub2": "^3.0.2",
     "express": "^4.21.2",
     "express-rate-limit": "^8.3.1",
     "fast-xml-parser": "^5.5.12",
+    "firebase-admin": "^14.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",
     "jwks-rsa": "^4.0.1",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
     "pg": "^8.20.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.5",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.17",
@@ -38,7 +41,12 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.20.0",
+    "eslint": "^10.12.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.71.1"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
   }
 }

@@ -4,6 +4,7 @@ import fs from 'fs';
 import { requireSupabaseAuth, requireLibraryAccess } from '../middleware/supabase-auth';
 import { hubClient } from '../services/hub';
 import { loadIdentity } from '../services/server-identity';
+import { containedPath, streamFile } from '../services/file-stream';
 
 export const filesRouter = Router();
 
@@ -36,13 +37,6 @@ const MIME_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
 };
 
-function safeJoin(root: string, sub: string): string | null {
-  const resolved = path.resolve(root, sub);
-  const resolvedRoot = path.resolve(root);
-  if (!resolved.startsWith(resolvedRoot)) return null;
-  return resolved;
-}
-
 /// GET /files/:bookId
 /// Streams a book file from this library server. Range-aware (so
 /// audiobook seek + iOS' lockscreen scrubber work).
@@ -67,12 +61,14 @@ filesRouter.get(
 
     let row: LibraryServerBook | null;
     try {
-      const { data, error } = await hubClient()
+      let lookup = hubClient()
         .from('library_server_books')
         .select('*')
         .eq('server_id', identity.serverId)
         .eq('book_id', bookId)
-        .maybeSingle();
+        .limit(1);
+      if (req.query.format) lookup = lookup.eq('media_type', String(req.query.format));
+      const { data, error } = await lookup.maybeSingle();
       if (error) throw error;
       row = (data as LibraryServerBook | null) ?? null;
     } catch (err) {
@@ -124,7 +120,7 @@ filesRouter.get(
       subPath = path.join(row.file_path, row.tracks[idx].file_path);
     }
 
-    const filePath = safeJoin(libraryPath, subPath);
+    const filePath = containedPath(libraryPath, subPath);
     if (!filePath) {
       res.status(403).json({ success: false, error: 'Invalid file path' });
       return;
@@ -134,31 +130,11 @@ filesRouter.get(
       return;
     }
 
-    const stat = fs.statSync(filePath);
     const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    const rangeHeader = req.headers.range;
-
-    if (rangeHeader && row.media_type === 'audiobook') {
-      const parts = rangeHeader.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-      const chunkSize = end - start + 1;
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': contentType,
-      });
-      fs.createReadStream(filePath, { start, end }).pipe(res);
-      return;
+    try {
+      streamFile(req, res, filePath, MIME_TYPES[ext] || 'application/octet-stream');
+    } catch {
+      if (!res.headersSent) res.status(404).json({ success: false, error: 'File missing on disk' });
     }
-
-    res.writeHead(200, {
-      'Content-Length': stat.size,
-      'Content-Type': contentType,
-      'Content-Disposition': `inline; filename="${path.basename(filePath)}"`,
-    });
-    fs.createReadStream(filePath).pipe(res);
   },
 );
