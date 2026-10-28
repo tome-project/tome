@@ -12,6 +12,7 @@ import {
   coversRouter,
   scannerRouter,
   booksRouter,
+  playbackRouter,
   legalRouter,
   requestsRouter,
   bookRequestsRouter,
@@ -83,6 +84,7 @@ app.use(coversRouter);    // GET /covers/:bookId → cover image
 app.use(legalRouter);     // GET /legal/{privacy,terms} → public legal pages
 app.use(scannerRouter);   // POST /scan → trigger a library scan (manual)
 app.use(booksRouter);     // GET /api/v1/books/:id/chapters
+app.use(playbackRouter);  // GET /api/v1/playback/probe + POST /api/v1/playback/sessions
 app.use(requestsRouter);  // GET /api/v1/books/:id/next-in-series → series-aware "what's next" → audiobook chapters
 app.use(bookRequestsRouter); // GET /api/v1/requests/pending → owner/agent acquisition queue
 if (isHubMode()) app.use(clubFilesRouter); // POST/GET/DELETE /api/v1/clubs/:clubId/file → transient host-shared file for clubs

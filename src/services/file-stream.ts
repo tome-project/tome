@@ -46,7 +46,7 @@ export function parseRange(
   return { start, end };
 }
 
-function audioRangeCapBytes(): number {
+export function audioRangeCapBytes(): number {
   const raw = process.env.TOME_MAX_AUDIO_RANGE_BYTES;
   if (raw == null || raw === '') return DEFAULT_MAX_AUDIO_RANGE_BYTES;
   const n = Number(raw);

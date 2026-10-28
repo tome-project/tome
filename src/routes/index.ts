@@ -7,6 +7,7 @@ export { filesRouter } from './files';
 export { coversRouter } from './covers';
 export { scannerRouter } from './scanner';
 export { booksRouter } from './books';
+export { playbackRouter } from './playback';
 export { legalRouter } from './legal';
 export { requestsRouter } from './requests';
 export { bookRequestsRouter } from './book-requests';
