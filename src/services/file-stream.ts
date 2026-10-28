@@ -3,6 +3,9 @@ import path from 'path';
 import { Request, Response } from 'express';
 import { pipeline } from 'stream';
 
+/** Cap open-ended audio ranges so reverse proxies / tunnels do not hold multi‑GB streams. */
+export const DEFAULT_MAX_AUDIO_RANGE_BYTES = 2 * 1024 * 1024;
+
 export function containedPath(root: string, relative: string): string | null {
   const base = path.resolve(root);
   const target = path.resolve(base, relative);
@@ -16,11 +19,16 @@ export function containedPath(root: string, relative: string): string | null {
   return target;
 }
 
-export function parseRange(value: string, size: number): { start: number; end: number } | null {
+export function parseRange(
+  value: string,
+  size: number,
+  maxSpan?: number,
+): { start: number; end: number } | null {
   const match = /^bytes=(\d*)-(\d*)$/.exec(value);
   if (!match || (!match[1] && !match[2]) || size <= 0) return null;
   let start: number;
   let end: number;
+  const openEnded = Boolean(match[1] && !match[2]);
   if (!match[1]) {
     const suffix = Number(match[2]);
     if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
@@ -32,7 +40,17 @@ export function parseRange(value: string, size: number): { start: number; end: n
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) return null;
     end = Math.min(end, size - 1);
   }
+  if (maxSpan && maxSpan > 0 && openEnded) {
+    end = Math.min(end, start + maxSpan - 1);
+  }
   return { start, end };
+}
+
+function audioRangeCapBytes(): number {
+  const raw = process.env.TOME_MAX_AUDIO_RANGE_BYTES;
+  if (raw == null || raw === '') return DEFAULT_MAX_AUDIO_RANGE_BYTES;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : DEFAULT_MAX_AUDIO_RANGE_BYTES;
 }
 
 export function streamFile(req: Request, res: Response, file: string, contentType: string): void {
@@ -46,7 +64,9 @@ export function streamFile(req: Request, res: Response, file: string, contentTyp
   res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(path.basename(file))}`);
   let range: { start: number; end: number } | undefined;
   if (req.headers.range) {
-    const parsed = parseRange(req.headers.range, stat.size);
+    const isAudio = contentType.startsWith('audio/');
+    const maxSpan = isAudio ? audioRangeCapBytes() : undefined;
+    const parsed = parseRange(req.headers.range, stat.size, maxSpan);
     if (!parsed) {
       res.setHeader('Content-Range', `bytes */${stat.size}`);
       res.status(416).end();

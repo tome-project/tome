@@ -10,6 +10,12 @@ test('ranges support seek, open ends, suffixes and clamp oversized ends',()=>{
  for(const r of ['bytes=100-','bytes=20-10','bytes=-0','bytes=1-2,5-6','bytes=a-b','bytes=9007199254740992-'])assert.equal(parseRange(r,100),null);
  assert.equal(parseRange('bytes=0-',0),null);
 });
+test('open-ended ranges honor optional maxSpan for tunnel-safe audio chunks',()=>{
+ assert.deepEqual(parseRange('bytes=0-',100_000_000,2*1024*1024),{start:0,end:2*1024*1024-1});
+ assert.deepEqual(parseRange('bytes=90-',100,2*1024*1024),{start:90,end:99});
+ assert.deepEqual(parseRange('bytes=10-19',100,2),{start:10,end:19}); // closed ranges unchanged
+ assert.deepEqual(parseRange('bytes=-10',100,2),{start:90,end:99}); // suffix unchanged
+});
 test('path boundary rejects sibling directories and symlink escapes',()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'tome-path-'));
  try {fs.mkdirSync(path.join(root,'library'));fs.writeFileSync(path.join(root,'outside'),'x');
